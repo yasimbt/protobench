@@ -555,3 +555,61 @@ Since you cannot click the GUI, verify criteria 4–5 by (a) unit-testing the GU
 - Keep `pb-core` deterministic and testable. Inject clocks (a `Clock` trait) so timeouts and generators are testable without sleeping.
 - Prefer small modules with doc comments on public items.
 - When this spec is ambiguous, choose the option that is most consistent with the rest of the spec, record the decision in `docs/DECISIONS.md`, and keep going. Do not stop to ask questions.
+
+---
+
+## Part C — Round 2 (milestones 13–19)
+
+> Tell Claude Code: **"Read PROTOBENCH_BUILD_PROMPT.md, review the current build and follow the Part C milestones in order. Do not stop until every Part C acceptance criterion passes."**
+
+Round 1 (milestones 1–12) implemented every **[MVP]** and **[V1]** item in Part A. A review of that build found the defects listed in C1. Round 2 fixes them first, then promotes the **[LATER]** items that can be built and tested without hardware or external services. Parts A and B still apply; where Part C differs, Part C wins.
+
+### C1. Review findings to fix (milestones 13–14)
+| # | Defect | Where | Required behaviour |
+|---|---|---|---|
+| R1 | `cargo clippy --workspace -- -D warnings` fails on Rust 1.95 (`collapsible_match`) | `sequence/model.rs` | Clean with `--all-targets` too |
+| R2 | COBS/SLIP text passthrough recognises a "line" in the middle of a frame. A COBS frame whose payload starts with tag `0x0A` (field 1, length-delimited) and whose code byte is printable is split into a text line and a framing error | `framing/mod.rs` `Delimited::push` | Text is recognised only between frames: a line may start only right after a delimiter (or at stream start) and must not contain bytes that make it a valid frame. A property test feeds random valid frames with text passthrough on and never loses a frame |
+| R3 | NaN passes `min`/`max` assertions (both comparisons are false) | `sequence/assert.rs` | A non-finite measured value fails any `min`/`max`/`eq` check with "not a finite number" |
+| R4 | `expect` subscribes only when the step starts, so a reply that arrives between a `send` (without `expect`) and the `expect` step is missed | `sequence/runner.rs` | The runner holds one subscription for the whole run. `expect` matches messages received since the previous step started, each message is consumed once, and the buffer is bounded |
+| R5 | The session ignores TCP-server client changes: the state stays Connected, pending requests are not failed, the framer is not reset, and sends with no client report `Sent` | `session/mod.rs`, `transport/net.rs` | New `ConnState::Listening` ("Waiting for client"). On client loss: reset the framer, fail pending requests, go to Listening. A send with no client resolves as `Error("no client connected")` |
+| R6 | No write timeout: a peer that stops reading blocks the I/O thread forever. Serial writes fail after the 5 ms read timeout | `transport/net.rs`, `transport/serial.rs` | TCP: 1 s write timeout; a timed-out write is a lost link (reconnect). Serial: keep writing partial chunks until a 1 s deadline; a deadline miss fails that request but keeps the port |
+| R7 | The decoded-frame size check compares against the encoded limit | `framing/mod.rs` `Delimited::finish` | Compare the decoded length with `max_frame_len + crc_len` |
+| R8 | A capture assertion on a channel not listed in `channels` uses all-time statistics | `sequence/runner.rs` `capture` | Every channel named in `channels` or in an assertion is marked at the start, and its stats cover only the capture window |
+| R9 | `measure_field` checks only the first element of a repeated field or `[*]` path | `sequence/assert.rs` | Every matched element must pass; `measured` is the array of values |
+| R10 | Line endings can change on checkout (the demo `layout.json` arrived as CRLF) | repository | `.gitattributes` with `* text=auto eol=lf` |
+
+Each fix gets a regression test that fails on the round-1 code.
+
+### C2. New features
+| Feature | Benefit | Tag |
+|---|---|---|
+| `protobench check --project <dir>`: validates `project.toml`, the schema, every sequence file (commands, messages, channels and paths resolve) and `layout.json`; prints findings as `file:line: level: message`; exit 0 = no errors, 1 = errors | Catch broken projects in CI before a jig run | Round 2 |
+| `protobench decode` gains `--channels a,b`, `--range <t0>:<t1>` (seconds) and `--per-channel` | Scriptable exports without the GUI | Round 2 |
+| Scripting with Rhai: a sequence step `action = "script"` with inline `code` or a `file`, sandboxed (operation limit, no file or network access). API: `var(name)`, `set_var(name, value)`, `send(command)` and `send_msg(message, #{...})` returning `#{status, response}`, `last(channel)`, `stats(channel)`, `log(text)`, `check(cond, message)`, `sleep(ms)` | Custom logic in sequences (from the [LATER] list) | Round 2 |
+| Foxglove WebSocket server (`foxglove.websocket.v1`): advertises one channel per message type (the MCAP topics, protobuf schema = the FileDescriptorSet) plus `/text` and `/markers` as JSON, and streams live messages to subscribers. Started by `protobench monitor --foxglove <port>` and from the GUI (**Tools ▸ Foxglove server**, port in Settings) | Use Foxglove's panels live (from the [LATER] list) | Round 2 |
+| Parquet export: `protobench decode --parquet out.parquet` and **Record ▸ Export Parquet**, columns `time_s` plus one nullable `float64` per channel, joined like CSV | Large datasets for pandas/polars (from the [LATER] list) | Round 2 |
+
+Still **[LATER]** because they need hardware, a broker or a second runtime that cannot be tested here: SEGGER RTT, BLE GATT, CAN, MQTT, Python bindings.
+
+### C3. Technology additions
+- `rhai` 1.26 (with `sync`, so engines are `Send`), `tungstenite` 0.30 (blocking, on threads, consistent with B4), `parquet` 60 + `arrow-array`/`arrow-schema` 60 behind a default-on `parquet` cargo feature of `pb-core`.
+- No tokio. Every new I/O path follows the round-1 threading model.
+
+### C4. Milestones (follow in order; commit after each)
+13. **Correctness:** R1, R2, R3, R7, R9, R10, with regression and property tests.
+14. **Session and transport robustness:** R4, R5, R6, R8, with tests (TCP server client swap, a stalled TCP peer, expect after a fire-and-forget send).
+15. **`protobench check`** and the new `decode` options, with CLI end-to-end tests.
+16. **Rhai `script` step**, a demo `sequences/scripted.toml` that passes against the simulator, and unit tests for the API and the sandbox limits.
+17. **Foxglove WebSocket server** in `pb-core`, the CLI flag and the GUI toggle, with an integration test that connects a `tungstenite` client, checks `serverInfo` and `advertise`, subscribes and decodes a live message with the advertised schema.
+18. **Parquet export** (CLI and GUI) with a round-trip test that reads the file back.
+19. **Documentation and acceptance pass:** update `README.md`, `USER_GUIDE.md`, `CONFIG_REFERENCE.md` and `DECISIONS.md`; run every acceptance criterion.
+
+### C5. Acceptance criteria — all must hold before you finish
+1. Every B12 acceptance criterion still holds, and `cargo clippy --workspace --all-targets -- -D warnings` is clean on Rust 1.95.
+2. Every C1 defect has a regression test, and all tests pass.
+3. `protobench check --project examples/demo-sensor` exits 0; a project with a broken sequence exits 1 and names the file and line.
+4. `protobench run --project examples/demo-sensor --sequence scripted --profile sim` exits 0.
+5. The Foxglove integration test passes.
+6. The Parquet round-trip test passes, and `protobench decode <file> --parquet out.parquet` writes a file that reads back with the same rows and columns as the CSV export.
+7. `protobench-gui --smoke-test` passes headless.
+8. The documentation describes the round-2 behaviour.

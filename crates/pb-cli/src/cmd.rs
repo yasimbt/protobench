@@ -337,16 +337,14 @@ pub fn monitor(a: MonitorArgs) -> Result<ExitCode> {
                     writeln!(out, "{:10.4} log {line}", host_ts_ns as f64 / 1e9)?;
                 }
             }
-            SessionEvent::BadFrame(b) => {
-                if !a.json {
-                    writeln!(
-                        out,
-                        "{:10.4} bad {} {}",
-                        b.host_ts_ns as f64 / 1e9,
-                        b.kind,
-                        b.reason
-                    )?;
-                }
+            SessionEvent::BadFrame(b) if !a.json => {
+                writeln!(
+                    out,
+                    "{:10.4} bad {} {}",
+                    b.host_ts_ns as f64 / 1e9,
+                    b.kind,
+                    b.reason
+                )?;
             }
             SessionEvent::State(s) => eprintln!("{}", s.label()),
             _ => {}

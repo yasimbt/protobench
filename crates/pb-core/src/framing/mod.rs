@@ -62,6 +62,9 @@ pub trait Framer: Send {
     /// Feeds received bytes; complete frames, text lines and errors are
     /// appended to `out`. Bytes may arrive split at any boundary.
     fn push(&mut self, data: &[u8], out: &mut Vec<FrameEvent>);
+    /// Called when the link has been quiet for a read timeout. Framers that
+    /// hold back possible text lines (COBS, SLIP) emit them here.
+    fn idle(&mut self, _out: &mut Vec<FrameEvent>) {}
     /// Drops any partial state (e.g. after reconnecting).
     fn reset(&mut self);
 }
@@ -187,13 +190,27 @@ enum Stuffing {
 }
 
 /// COBS and SLIP: frames end at a delimiter byte.
+///
+/// With text passthrough on, a printable line can only start at a frame
+/// boundary, but any run of non-delimiter bytes is also a valid frame prefix,
+/// so the decision is deferred: lines that could be text are held as a
+/// "text chain" at the start of the buffer. At the next delimiter the whole
+/// buffer is first tried as one frame; if that fails, the chain is emitted as
+/// text and the rest is decoded as the frame. When the link goes quiet,
+/// [`Framer::idle`] emits the chain.
 struct Delimited {
     stuffing: Stuffing,
     crc: Crc,
+    /// Largest decoded frame: `max_frame_len` plus the CRC.
+    max_decoded: usize,
     max_encoded: usize,
     text: bool,
     buf: Vec<u8>,
     overflow: bool,
+    /// End (exclusive, after the `\n`) of the leading text chain in `buf`.
+    text_end: usize,
+    /// False once a non-text line ended in `buf`: the chain cannot grow.
+    chain_open: bool,
 }
 
 impl Delimited {
@@ -204,11 +221,14 @@ impl Delimited {
         };
         Self {
             stuffing,
+            max_decoded: max + crc.len(),
             crc,
             max_encoded,
             text,
             buf: Vec::new(),
             overflow: false,
+            text_end: 0,
+            chain_open: true,
         }
     }
 
@@ -219,6 +239,125 @@ impl Delimited {
         }
     }
 
+    fn unstuff(&self, b: &[u8]) -> Result<Vec<u8>, &'static str> {
+        match self.stuffing {
+            Stuffing::Cobs => cobs::decode(b),
+            Stuffing::Slip => slip::decode(b),
+        }
+    }
+
+    /// Decodes and checks one stuffed block, appending the result.
+    fn decode_block(&self, block: &[u8], out: &mut Vec<FrameEvent>) {
+        if block.is_empty() {
+            return;
+        }
+        match self.unstuff(block) {
+            Ok(frame) if frame.len() > self.max_decoded => out.push(FrameEvent::Error {
+                kind: FrameErrorKind::Framing,
+                reason: "frame exceeds max_frame_len".into(),
+                bytes: truncate(&frame),
+            }),
+            Ok(frame) => {
+                crc_event(&self.crc, &frame, out);
+            }
+            Err(reason) => out.push(FrameEvent::Error {
+                kind: FrameErrorKind::Framing,
+                reason: reason.into(),
+                bytes: truncate(block),
+            }),
+        }
+    }
+
+    /// True if `block` decodes to a frame that passes the CRC.
+    fn is_good_frame(&self, block: &[u8]) -> bool {
+        match self.unstuff(block) {
+            Ok(f) => f.len() <= self.max_decoded && self.crc.check(&f).is_ok(),
+            Err(_) => false,
+        }
+    }
+
+    /// Emits `buf[..end]` (part of the text chain) as lines and removes it.
+    fn emit_lines(&mut self, end: usize, out: &mut Vec<FrameEvent>) {
+        if end == 0 {
+            return;
+        }
+        let chain: Vec<u8> = self.buf.drain(..end).collect();
+        for line in chain.split(|&b| b == b'\n') {
+            if !is_blank(line) {
+                out.push(FrameEvent::Text(line_string(line)));
+            }
+        }
+        self.rescan();
+    }
+
+    /// Emits the chain up to its last real line. Trailing blank lines stay:
+    /// they may be the first bytes of a frame that is still arriving.
+    fn emit_chain(&mut self, out: &mut Vec<FrameEvent>) {
+        let mut end = 0;
+        let mut start = 0;
+        for cut in self.chain_cuts() {
+            if !is_blank(&self.buf[start..cut - 1]) {
+                end = cut;
+            }
+            start = cut;
+        }
+        self.emit_lines(end, out);
+    }
+
+    /// Positions just after each line ending in the text chain.
+    fn chain_cuts(&self) -> Vec<usize> {
+        self.buf[..self.text_end]
+            .iter()
+            .enumerate()
+            .filter(|(_, &b)| b == b'\n')
+            .map(|(i, _)| i + 1)
+            .collect()
+    }
+
+    /// The first cut that leaves nothing or a good frame after it.
+    fn best_cut(&self) -> Option<usize> {
+        self.chain_cuts().into_iter().find(|&c| {
+            let rest = &self.buf[c..];
+            rest.is_empty() || self.is_good_frame(rest)
+        })
+    }
+
+    /// Rebuilds the text chain for the bytes now in the buffer.
+    fn rescan(&mut self) {
+        self.text_end = 0;
+        self.chain_open = true;
+        let mut i = 0;
+        while let Some(off) = self.buf[i..].iter().position(|&b| b == b'\n') {
+            let n = i + off;
+            if !self.extend_chain(n) {
+                break;
+            }
+            i = n + 1;
+        }
+    }
+
+    /// Offers the line ending at `buf[n] == b'\n'` to the chain.
+    fn extend_chain(&mut self, n: usize) -> bool {
+        if !self.chain_open {
+            return false;
+        }
+        let seg = &self.buf[self.text_end..n];
+        if is_blank(seg) || looks_like_text(seg) {
+            self.text_end = n + 1;
+            true
+        } else {
+            self.chain_open = false;
+            false
+        }
+    }
+
+    /// True when `buf[..cut]` holds a real line of at least two characters.
+    fn has_line(&self, cut: usize) -> bool {
+        self.buf[..cut]
+            .split(|&b| b == b'\n')
+            .any(|l| line_string(l).trim().len() >= 2)
+    }
+
     fn finish(&mut self, out: &mut Vec<FrameEvent>) {
         if self.overflow {
             out.push(FrameEvent::Error {
@@ -226,33 +365,34 @@ impl Delimited {
                 reason: "frame exceeds max_frame_len".into(),
                 bytes: truncate(&self.buf),
             });
-        } else if !self.buf.is_empty() {
-            let decoded = match self.stuffing {
-                Stuffing::Cobs => cobs::decode(&self.buf),
-                Stuffing::Slip => slip::decode(&self.buf),
-            };
-            match decoded {
-                Ok(frame) => {
-                    if frame.len() > self.max_encoded {
-                        out.push(FrameEvent::Error {
-                            kind: FrameErrorKind::Framing,
-                            reason: "frame exceeds max_frame_len".into(),
-                            bytes: truncate(&frame),
-                        });
-                    } else {
-                        crc_event(&self.crc, &frame, out);
-                    }
-                }
-                Err(reason) => out.push(FrameEvent::Error {
-                    kind: FrameErrorKind::Framing,
-                    reason: reason.into(),
-                    bytes: truncate(&self.buf),
-                }),
+        } else if self.text_end == 0 {
+            let buf = std::mem::take(&mut self.buf);
+            self.decode_block(&buf, out);
+        } else {
+            // Text chain or frame data? A whole frame that passes a real CRC
+            // wins. Without a CRC, a chain with a real line wins when the
+            // rest is a good frame on its own.
+            let whole = self.is_good_frame(&self.buf);
+            let cut = self.best_cut();
+            let as_frame =
+                whole && (!self.crc.is_empty() || !cut.is_some_and(|c| self.has_line(c)));
+            if !as_frame {
+                let end = cut.unwrap_or(self.text_end);
+                self.emit_lines(end, out);
             }
+            let buf = std::mem::take(&mut self.buf);
+            self.decode_block(&buf, out);
         }
         self.buf.clear();
         self.overflow = false;
+        self.text_end = 0;
+        self.chain_open = true;
     }
+}
+
+/// True for an empty or whitespace-only line.
+fn is_blank(b: &[u8]) -> bool {
+    b.iter().all(|&x| matches!(x, b' ' | b'\t' | b'\r'))
 }
 
 impl Framer for Delimited {
@@ -275,24 +415,37 @@ impl Framer for Delimited {
         for &b in data {
             if b == delim {
                 self.finish(out);
-            } else if self.text && b == b'\n' && !self.overflow && looks_like_text(&self.buf) {
-                out.push(FrameEvent::Text(line_string(&self.buf)));
-                self.buf.clear();
             } else if self.overflow {
                 // Drop bytes until the next delimiter.
                 continue;
             } else {
                 self.buf.push(b);
+                if self.text && b == b'\n' {
+                    let n = self.buf.len() - 1;
+                    self.extend_chain(n);
+                }
                 if self.buf.len() > self.max_encoded {
-                    self.overflow = true;
+                    // Lines in front of an oversized block are still text.
+                    self.emit_chain(out);
+                    if self.buf.len() > self.max_encoded {
+                        self.overflow = true;
+                    }
                 }
             }
+        }
+    }
+
+    fn idle(&mut self, out: &mut Vec<FrameEvent>) {
+        if !self.overflow {
+            self.emit_chain(out);
         }
     }
 
     fn reset(&mut self) {
         self.buf.clear();
         self.overflow = false;
+        self.text_end = 0;
+        self.chain_open = true;
     }
 }
 

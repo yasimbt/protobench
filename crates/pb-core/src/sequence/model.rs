@@ -235,13 +235,11 @@ fn validate_steps(steps: &[Step]) -> Result<(), String> {
         match s {
             Step::Send {
                 command, message, ..
-            } => {
-                if command.is_some() == message.is_some() {
-                    return Err(format!(
-                        "step {}: send needs exactly one of `command` or `message`",
-                        i + 1
-                    ));
-                }
+            } if command.is_some() == message.is_some() => {
+                return Err(format!(
+                    "step {}: send needs exactly one of `command` or `message`",
+                    i + 1
+                ));
             }
             Step::Capture {
                 channels,
@@ -259,13 +257,13 @@ fn validate_steps(steps: &[Step]) -> Result<(), String> {
                     ));
                 }
             }
-            Step::Set { var, value, vars } => {
-                if var.is_some() != value.is_some() || (var.is_none() && vars.is_empty()) {
-                    return Err(format!(
-                        "step {}: set needs `var` and `value`, or `vars`",
-                        i + 1
-                    ));
-                }
+            Step::Set { var, value, vars }
+                if var.is_some() != value.is_some() || (var.is_none() && vars.is_empty()) =>
+            {
+                return Err(format!(
+                    "step {}: set needs `var` and `value`, or `vars`",
+                    i + 1
+                ));
             }
             Step::Loop { steps, .. } => {
                 validate_steps(steps).map_err(|e| format!("in loop at step {}: {e}", i + 1))?

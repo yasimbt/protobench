@@ -742,7 +742,7 @@ impl Worker {
             let mut lost: Option<String> = None;
             if let Some(t) = transport.as_mut() {
                 match t.read(&mut buf) {
-                    Ok(0) => {}
+                    Ok(0) => self.handle_idle(),
                     Ok(n) => {
                         let data = buf[..n].to_vec();
                         self.handle_rx(&data, t.as_mut());
@@ -992,6 +992,23 @@ impl Worker {
         let mut events = std::mem::take(&mut self.events);
         events.clear();
         self.framer.push(data, &mut events);
+        self.process_events(&mut events, ts);
+        self.events = events;
+    }
+
+    /// The link was quiet for a read timeout: let the framer flush held text.
+    fn handle_idle(&mut self) {
+        let mut events = std::mem::take(&mut self.events);
+        events.clear();
+        self.framer.idle(&mut events);
+        if !events.is_empty() {
+            let ts = self.now();
+            self.process_events(&mut events, ts);
+        }
+        self.events = events;
+    }
+
+    fn process_events(&mut self, events: &mut Vec<FrameEvent>, ts: u64) {
         for ev in events.drain(..) {
             match ev {
                 FrameEvent::Frame(payload) => self.handle_frame(payload, ts),
@@ -1024,7 +1041,6 @@ impl Worker {
                 }
             }
         }
-        self.events = events;
     }
 
     fn bad_frame(&self, kind: &'static str, reason: String, bytes: Vec<u8>, ts: u64) {

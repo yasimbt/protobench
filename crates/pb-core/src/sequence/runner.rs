@@ -7,7 +7,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value as Json;
 
-use super::assert::{check, check_stat, measure_field, AssertionResult, Measured};
+use super::assert::{
+    check, check_each, check_stat, measure_all, measure_field, AssertionResult, Measured,
+};
 use super::model::{Assertion, NonInteractive, SequenceFile, Step};
 use super::report::{RunReport, StepReport, StepStatus, Summary};
 use crate::codec::DecodedMessage;
@@ -450,7 +452,7 @@ impl Ctx<'_> {
         asserts
             .iter()
             .map(|a| match (&a.path, &a.channel) {
-                (Some(p), _) => check(a, p, measure_field(&msg.msg, p)),
+                (Some(p), _) => check_each(a, p, measure_all(&msg.msg, p)),
                 (None, Some(_)) => self.check_channel_last(a),
                 (None, None) => check(a, "?", Err("assertion needs `path` or `channel`".into())),
             })

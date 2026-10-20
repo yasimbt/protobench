@@ -37,6 +37,7 @@ impl Host {
     fn decode(&mut self, bytes: &[u8]) -> (Vec<DecodedMessage>, Vec<String>, usize) {
         let mut ev = Vec::new();
         self.framer.push(bytes, &mut ev);
+        self.framer.idle(&mut ev);
         let mut msgs = Vec::new();
         let mut text = Vec::new();
         let mut errors = 0;

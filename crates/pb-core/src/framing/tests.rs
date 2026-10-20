@@ -334,3 +334,156 @@ fn documented_hex_examples() {
         vec![0x05, 0x08, 0x01, 0x12, 0x00, crc8]
     );
 }
+
+fn texts(events: &[FrameEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|e| match e {
+            FrameEvent::Text(t) => Some(t.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A frame whose COBS code byte is printable and whose payload starts with
+/// tag 0x0A (field 1, length-delimited) used to be split into a one-character
+/// text line and a framing error.
+#[test]
+fn frame_starting_with_newline_tag_is_not_text() {
+    let mut payload = vec![0x0A, 40];
+    payload.extend((0..40).map(|i| b'a' + (i % 26) as u8));
+    for kind in [FramingType::Cobs, FramingType::Slip] {
+        for crc in [CrcKind::None, CrcKind::Crc16CcittFalse] {
+            let mut c = cfg(kind, crc);
+            c.text_passthrough = true;
+            let mut f = build_framer(&c);
+            let wire = f.encode(&payload);
+            if kind == FramingType::Cobs {
+                assert!((0x21..0x7F).contains(&wire[0]), "code byte {:#x}", wire[0]);
+            }
+            let mut ev = Vec::new();
+            f.push(&wire, &mut ev);
+            f.idle(&mut ev);
+            assert_eq!(ev, vec![FrameEvent::Frame(payload.clone())], "{c:?}");
+        }
+    }
+}
+
+#[test]
+fn text_without_frames_is_flushed_when_idle() {
+    for kind in [FramingType::Cobs, FramingType::Slip] {
+        let mut c = cfg(kind, CrcKind::Crc16CcittFalse);
+        c.text_passthrough = true;
+        let mut f = build_framer(&c);
+        let mut ev = Vec::new();
+        f.push(b"I: boot ok\r\nW: lo", &mut ev);
+        assert!(ev.is_empty(), "held until idle or a delimiter");
+        f.idle(&mut ev);
+        assert_eq!(texts(&ev), vec!["I: boot ok".to_string()]);
+        // The partial line stays and completes later.
+        f.push(b"w battery\n", &mut ev);
+        f.idle(&mut ev);
+        assert_eq!(
+            texts(&ev),
+            vec!["I: boot ok".to_string(), "W: low battery".to_string()]
+        );
+    }
+}
+
+#[test]
+fn decoded_size_limit_is_max_frame_len_plus_crc() {
+    let mut c = cfg(FramingType::Cobs, CrcKind::Crc16CcittFalse);
+    c.max_frame_len = 300;
+    let enc = build_framer(&c);
+    let ok = vec![0x11u8; 300];
+    let mut too_big = enc.encode(&vec![0x11u8; 301]);
+    too_big.extend(enc.encode(&ok));
+    let mut f = build_framer(&c);
+    let mut ev = Vec::new();
+    f.push(&too_big, &mut ev);
+    assert!(
+        matches!(&ev[0], FrameEvent::Error { reason, .. } if reason.contains("max_frame_len")),
+        "{ev:?}"
+    );
+    assert_eq!(frames(&ev), vec![ok]);
+}
+
+fn log_line() -> impl Strategy<Value = String> {
+    ("[!-~]", "[ -~]{0,60}").prop_map(|(a, b)| format!("{a}{b}").trim_end().to_string())
+}
+
+#[derive(Debug, Clone)]
+enum Item {
+    Frame(Vec<u8>),
+    Line(String),
+}
+
+fn items() -> impl Strategy<Value = Vec<Item>> {
+    prop::collection::vec(
+        prop_oneof![
+            prop::collection::vec(any::<u8>(), 1..200).prop_map(Item::Frame),
+            log_line().prop_map(Item::Line),
+        ],
+        1..12,
+    )
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// With text passthrough on, random frames are never lost or split, at
+    /// any read boundary.
+    #[test]
+    fn text_passthrough_never_loses_frames(
+        ps in prop::collection::vec(prop::collection::vec(any::<u8>(), 1..300), 1..8),
+        cut in any::<prop::sample::Index>(),
+    ) {
+        for kind in [FramingType::Cobs, FramingType::Slip] {
+            for crc in [CrcKind::Crc16CcittFalse, CrcKind::Crc32] {
+                let mut c = cfg(kind, crc);
+                c.text_passthrough = true;
+                let enc = build_framer(&c);
+                let stream: Vec<u8> = ps.iter().flat_map(|p| enc.encode(p)).collect();
+                let k = cut.index(stream.len() + 1);
+                let mut f = build_framer(&c);
+                let mut ev = Vec::new();
+                f.push(&stream[..k], &mut ev);
+                f.push(&stream[k..], &mut ev);
+                f.idle(&mut ev);
+                prop_assert_eq!(&ev, &ps.iter().cloned().map(FrameEvent::Frame).collect::<Vec<_>>(), "{:?}", c);
+            }
+        }
+    }
+
+    /// Log lines and frames interleaved on one link come out in order.
+    #[test]
+    fn text_and_frames_interleaved(items in items(), cut in any::<prop::sample::Index>()) {
+        for kind in [FramingType::Cobs, FramingType::Slip] {
+            let mut c = cfg(kind, CrcKind::Crc32);
+            c.text_passthrough = true;
+            let enc = build_framer(&c);
+            let mut stream = Vec::new();
+            let mut want = Vec::new();
+            for it in &items {
+                match it {
+                    Item::Frame(p) => {
+                        stream.extend(enc.encode(p));
+                        want.push(FrameEvent::Frame(p.clone()));
+                    }
+                    Item::Line(l) => {
+                        stream.extend(l.as_bytes());
+                        stream.push(b'\n');
+                        want.push(FrameEvent::Text(l.clone()));
+                    }
+                }
+            }
+            let k = cut.index(stream.len() + 1);
+            let mut f = build_framer(&c);
+            let mut ev = Vec::new();
+            f.push(&stream[..k], &mut ev);
+            f.push(&stream[k..], &mut ev);
+            f.idle(&mut ev);
+            prop_assert_eq!(&ev, &want, "{:?}", c);
+        }
+    }
+}

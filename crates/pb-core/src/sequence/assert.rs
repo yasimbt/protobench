@@ -40,7 +40,7 @@ impl Measured {
         match self {
             Measured::Num(v) => serde_json::Number::from_f64(*v)
                 .map(Json::Number)
-                .unwrap_or(Json::Null),
+                .unwrap_or_else(|| Json::String(v.to_string())),
             Measured::Bool(b) => Json::Bool(*b),
             Measured::Str(s) => Json::String(s.clone()),
             Measured::Enum(_, n) => Json::String(n.clone()),
@@ -71,31 +71,72 @@ impl Measured {
     }
 }
 
-/// Reads a field from a message as a [`Measured`] value.
+/// Reads a field from a message as a [`Measured`] value (the first element
+/// when the path matches several).
 pub fn measure_field(msg: &DynamicMessage, path: &str) -> Result<Measured, String> {
-    let p = FieldPath::parse(path)?;
-    let e = extract(msg, &p)
+    measure_all(msg, path)?
         .into_iter()
         .next()
-        .ok_or_else(|| format!("`{path}` is not present in the message"))?;
-    Ok(match &e.value {
-        Value::Bool(b) => Measured::Bool(*b),
-        Value::String(s) => Measured::Str(s.clone()),
-        Value::EnumNumber(n) => {
-            let name = match e.field.kind() {
-                prost_reflect::Kind::Enum(d) => d
-                    .get_value(*n)
-                    .map(|v| v.name().to_string())
-                    .unwrap_or_else(|| n.to_string()),
-                _ => n.to_string(),
-            };
-            Measured::Enum(*n, name)
+        .ok_or_else(|| format!("`{path}` is not present in the message"))
+}
+
+/// Reads every element a path matches (a repeated field or `[*]`).
+pub fn measure_all(msg: &DynamicMessage, path: &str) -> Result<Vec<Measured>, String> {
+    let p = FieldPath::parse(path)?;
+    let found = extract(msg, &p);
+    if found.is_empty() {
+        return Err(format!("`{path}` is not present in the message"));
+    }
+    found
+        .iter()
+        .map(|e| match &e.value {
+            Value::Bool(b) => Ok(Measured::Bool(*b)),
+            Value::String(s) => Ok(Measured::Str(s.clone())),
+            Value::EnumNumber(n) => {
+                let name = match e.field.kind() {
+                    prost_reflect::Kind::Enum(d) => d
+                        .get_value(*n)
+                        .map(|v| v.name().to_string())
+                        .unwrap_or_else(|| n.to_string()),
+                    _ => n.to_string(),
+                };
+                Ok(Measured::Enum(*n, name))
+            }
+            v => crate::schema::value_to_f64(v)
+                .map(Measured::Num)
+                .ok_or_else(|| format!("`{path}` is not a scalar")),
+        })
+        .collect()
+}
+
+/// Checks an assertion against every matched element: all must pass, and
+/// `measured` is the array of values when there are several.
+pub fn check_each(a: &Assertion, what: &str, m: Result<Vec<Measured>, String>) -> AssertionResult {
+    let values = match m {
+        Ok(v) if v.len() > 1 => v,
+        Ok(v) => {
+            return check(
+                a,
+                what,
+                v.into_iter()
+                    .next()
+                    .ok_or_else(|| format!("`{what}` has no elements")),
+            )
         }
-        v => match crate::schema::value_to_f64(v) {
-            Some(x) => Measured::Num(x),
-            None => return Err(format!("`{path}` is not a scalar")),
-        },
-    })
+        Err(e) => return check(a, what, Err(e)),
+    };
+    let results: Vec<AssertionResult> = values.into_iter().map(|v| check(a, what, Ok(v))).collect();
+    let failures: Vec<String> = results
+        .iter()
+        .enumerate()
+        .filter_map(|(i, r)| r.message.as_ref().map(|m| format!("[{i}] {m}")))
+        .collect();
+    AssertionResult {
+        description: results[0].description.clone(),
+        measured: Json::Array(results.iter().map(|r| r.measured.clone()).collect()),
+        passed: failures.is_empty(),
+        message: (!failures.is_empty()).then(|| failures.join("; ")),
+    }
 }
 
 /// Checks an assertion against a measured value. `what` names the value.
@@ -130,6 +171,17 @@ pub fn check(a: &Assertion, what: &str, m: Result<Measured, String>) -> Assertio
         }
     };
     let mut fails = Vec::new();
+    let non_finite = matches!(m.as_f64(), Some(v) if !v.is_finite());
+    if non_finite && (eq.is_some() || a.min.is_some() || a.max.is_some()) {
+        // NaN compares false with everything, so it would slip past limits.
+        let measured = m.to_json();
+        return AssertionResult {
+            description: desc,
+            passed: false,
+            message: Some(format!("measured {measured}: not a finite number")),
+            measured,
+        };
+    }
     if let Some(e) = &eq {
         if !m.equals(e, a.within) {
             fails.push(format!("expected {e}"));
@@ -274,6 +326,82 @@ mod tests {
         assert!(!r.passed);
         assert_eq!(r.message.as_deref(), Some("missing"));
         assert!(!check(&Assertion::default(), "x", Ok(Measured::Num(1.0))).passed);
+    }
+
+    #[test]
+    fn non_finite_values_fail_limits() {
+        let limits = a(|x| {
+            x.min = Some(200.0);
+            x.max = Some(300.0)
+        });
+        for v in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let r = check(&limits, "current_na", Ok(Measured::Num(v)));
+            assert!(!r.passed, "{v} passed");
+            assert!(r.message.unwrap().contains("not a finite number"));
+        }
+        let r = check(&limits, "s", Ok(Measured::Str("NaN".into())));
+        assert!(!r.passed);
+        let eq = a(|x| x.eq = Some(toml::Value::Float(1.0)));
+        assert!(!check(&eq, "v", Ok(Measured::Num(f64::NAN))).passed);
+        // Capture statistics go through the same check.
+        let snap = StatsSnapshot {
+            count: 10,
+            mean: f64::NAN,
+            ..Default::default()
+        };
+        let r = check_stat(
+            &a(|x| {
+                x.channel = Some("c".into());
+                x.min = Some(0.0)
+            }),
+            &[("c".into(), Some(snap))],
+        );
+        assert!(!r.passed);
+        assert_eq!(r.measured, Json::String("NaN".into()));
+    }
+
+    #[test]
+    fn every_element_of_a_repeated_path_is_checked() {
+        let lim = a(|x| x.max = Some(10.0));
+        let r = check_each(
+            &lim,
+            "adc[*]",
+            Ok(vec![
+                Measured::Num(1.0),
+                Measured::Num(20.0),
+                Measured::Num(3.0),
+            ]),
+        );
+        assert!(!r.passed);
+        assert_eq!(r.measured, serde_json::json!([1.0, 20.0, 3.0]));
+        assert!(r.message.unwrap().starts_with("[1] measured 20"));
+        let r = check_each(
+            &lim,
+            "adc[*]",
+            Ok(vec![Measured::Num(1.0), Measured::Num(2.0)]),
+        );
+        assert!(r.passed);
+        let r = check_each(&lim, "adc[0]", Ok(vec![Measured::Num(1.0)]));
+        assert_eq!(r.measured, serde_json::json!(1.0));
+    }
+
+    #[test]
+    fn measure_all_reads_repeated_fields() {
+        let p = crate::project::Project::open(&crate::schema::tests::demo_dir());
+        let s = p.schema.clone().unwrap();
+        let c = crate::codec::Codec::new(&p.config, &s, crate::codec::Role::Device).unwrap();
+        let t = c.resolve_tx("telemetry").unwrap();
+        let m = c
+            .build(&t, serde_json::json!({"adc": [5, 6, 7], "vout_raw": 9}))
+            .unwrap();
+        let all = measure_all(&m, "telemetry.adc[*]").unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(measure_all(&m, "telemetry.adc").unwrap().len(), 3);
+        assert_eq!(
+            measure_field(&m, "telemetry.adc[2]").unwrap(),
+            Measured::Num(7.0)
+        );
+        assert!(measure_all(&m, "telemetry.nope").is_err());
     }
 
     #[test]

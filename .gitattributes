@@ -1,0 +1,10 @@
+# Keep line endings LF in the repository and on checkout (a CRLF layout.json
+# once arrived through a zip extracted on Windows).
+* text=auto eol=lf
+
+*.pbsession binary
+*.mcap      binary
+*.parquet   binary
+*.desc      binary
+*.pb        binary
+*.png       binary

@@ -1,0 +1,179 @@
+config_version = 1
+name = "Demo Sensor"
+description = "Example amperometric sensor board"
+
+[schema]
+proto_files   = ["proto/device.proto"]       # relative to project folder
+include_paths = ["proto"]                     # bundled nanopb.proto is always available
+# descriptor_set = "build/device.desc"        # alternative to proto_files
+
+[connection]                                   # default profile
+profile = "usb"
+
+[[connection.profiles]]
+name = "usb"
+transport = "serial"                           # serial | tcp_client | tcp_server | udp | sim | replay
+port = "auto"                                  # "auto" = first port matching vid/pid, or a name like COM5 or /dev/ttyACM0
+usb_vid = 0x0483                               # optional, for auto-select
+usb_pid = 0x5740
+baud = 921600
+data_bits = 8
+parity = "none"
+stop_bits = 1
+flow_control = "none"
+dtr_on_open = true
+rts_on_open = false
+auto_reconnect = true
+
+[[connection.profiles]]
+name = "sim"
+transport = "sim"
+
+[[connection.profiles]]
+name = "net"
+transport = "tcp_client"
+host = "192.168.1.50"
+tcp_port = 9000
+
+[framing]
+type = "cobs"                     # cobs | slip | varint_len | fixed_len | none
+# len_bytes = 2                   # for fixed_len: 1 | 2 | 4
+# endian = "little"
+# sync_word = [0xAA, 0x55]        # optional header before the length
+crc = "crc16_ccitt_false"         # none | crc8 | crc16_ccitt_false | crc16_modbus | crc32
+crc_endian = "little"
+max_frame_len = 1024
+text_passthrough = true           # printable lines outside frames go to the text console
+
+[codec]
+mode = "envelope"                 # envelope | id_prefix | fixed
+tx_root = "demo.HostToDevice"     # envelope/fixed: message type sent to the device
+rx_root = "demo.DeviceToHost"     # envelope/fixed: message type received
+# id_prefix mode:
+# id_width = 1                    # 1 | 2 | "varint"
+# [codec.ids]
+# 0x01 = "demo.Telemetry"
+# 0x02 = "demo.Ack"
+
+[correlation]
+request_field  = "seq"            # path in tx_root that carries the sequence id
+response_field = "seq"            # path in rx_root that echoes it
+default_timeout_ms = 500
+default_retries = 1
+
+[timestamp]
+source = "device"                 # device | host
+field = "telemetry.timestamp_us"  # used when source = device
+unit = "us"                       # us | ms | s
+wrap_bits = 32                    # 0 = no wrap handling
+
+# ---------- field metadata overlay ----------
+[[fields]]
+path = "telemetry.vout_raw"
+display = "Vout"
+unit = "mV"
+scale = 0.0503
+offset = 0.0
+format = "{:.2}"
+warn_min = 100.0
+warn_max = 3200.0
+
+# ---------- commands ----------
+[[commands]]
+name = "Ping"
+group = "System"
+shortcut = "F1"
+message = "ping"                  # oneof member of tx_root (envelope mode) or a full type name
+payload = {}
+expect = "pong"                   # oneof member or type expected in reply; omit for fire-and-forget
+
+[[commands]]
+name = "Set Bias"
+group = "AFE"
+message = "set_bias"
+payload = { millivolts = 200 }
+prompt = ["millivolts"]           # fields the user edits before sending
+expect = "ack"
+timeout_ms = 1000
+
+[[commands]]
+name = "Start Stream"
+group = "Stream"
+message = "stream_ctrl"
+payload = { enable = true, rate_hz = 1000 }
+expect = "ack"
+
+[[commands]]
+name = "Erase Calibration"
+group = "Danger"
+message = "erase_cal"
+payload = {}
+dangerous = true
+colour = "#c0392b"
+
+[[commands]]
+name = "Heartbeat"
+group = "System"
+message = "ping"
+payload = {}
+periodic_ms = 1000                # shows a periodic-send toggle on the button
+
+# ---------- telemetry ----------
+[[telemetry]]
+name = "AFE stream"
+mode = "stream"                   # stream | poll | triggered
+message = "telemetry"
+channels = [
+  "telemetry.vout_raw",
+  "telemetry.current_na",
+  "telemetry.temperature_c",
+  "telemetry.adc[*]",
+  "telemetry.state",
+]
+
+[[telemetry]]
+name = "Status poll"
+mode = "poll"
+request = "get_status"            # command message (oneof member) to send
+request_payload = {}
+response = "status"
+interval_ms = 500
+channels = ["status.battery_mv", "status.uptime_s", "status.fault_flags"]
+
+[[derived]]
+name = "power_uw"
+expr = "telemetry.vout_raw * 0.0503 * telemetry.current_na / 1000"
+unit = "uW"
+
+# ---------- simulator ----------
+[simulator]
+latency_ms = 2
+drop_rate = 0.0
+corrupt_rate = 0.0
+
+[[simulator.streams]]
+message = "telemetry"
+rate_hz = 1000
+start_enabled = false             # toggled by the stream_ctrl command
+fields = { "vout_raw" = "sine(amp=1500, offset=1600, freq=2)", "current_na" = "noise(mean=250, std=5)", "temperature_c" = "random_walk(start=24, step=0.01)", "adc" = "array(4, sine(amp=1000, offset=2048, freq=5))", "state" = "enum_cycle(period_s=3)", "timestamp_us" = "time_us()" }
+
+[[simulator.responses]]
+on = "ping"
+reply = "pong"
+payload = {}
+
+[[simulator.responses]]
+on = "set_bias"
+reply = "ack"
+payload = { ok = true }
+
+[[simulator.responses]]
+on = "stream_ctrl"
+reply = "ack"
+payload = { ok = true }
+action = "toggle_stream:telemetry"
+
+[[simulator.responses]]
+on = "get_status"
+reply = "status"
+payload = { battery_mv = "ramp(start=4100, end=3600, period_s=120)", uptime_s = "uptime_s()", fault_flags = 0 }

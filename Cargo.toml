@@ -1,0 +1,43 @@
+[workspace]
+resolver = "2"
+members = ["crates/pb-core", "crates/pb-sim", "crates/pb-gui", "crates/pb-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.95"
+
+[workspace.dependencies]
+pb-core = { path = "crates/pb-core" }
+pb-sim = { path = "crates/pb-sim" }
+anyhow = "1.0.104"
+base64 = "0.22"
+miette = "7.6"
+chrono = "0.4.45"
+clap = { version = "4.6.7", features = ["derive"] }
+cobs = "0.5.1"
+crc = "3.4.0"
+crossbeam-channel = "0.5.17"
+eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "glow", "wayland", "x11", "persistence"] }
+egui = "0.36.2"
+egui_dock = { version = "0.21.1", features = ["serde"] }
+egui_plot = "0.37.0"
+evalexpr = "13.1.0"
+mcap = "0.26.0"
+parking_lot = "0.12.5"
+proptest = "1.12.0"
+prost = "0.14.4"
+prost-reflect = { version = "0.16.5", features = ["serde", "text-format"] }
+prost-types = "0.14.4"
+protox = "0.10.0"
+rfd = "0.17.2"
+serde = { version = "1", features = ["derive"] }
+serde_ignored = "0.1"
+serde_json = "1.0.154"
+serialport = { version = "4.10.1", default-features = false }
+thiserror = "2.0.21"
+toml = "1.1.8"
+toml_edit = "0.25.17"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

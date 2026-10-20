@@ -1,0 +1,4 @@
+/target
+*:Zone.Identifier
+/examples/*/recordings/
+/examples/*/reports/

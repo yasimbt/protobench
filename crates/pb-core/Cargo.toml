@@ -1,0 +1,32 @@
+[package]
+name = "pb-core"
+description = "ProtoBench core: schema, framing, codec, transports, telemetry, recording, sequences"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+base64.workspace = true
+chrono.workspace = true
+cobs.workspace = true
+crc.workspace = true
+crossbeam-channel.workspace = true
+evalexpr.workspace = true
+mcap.workspace = true
+parking_lot.workspace = true
+prost.workspace = true
+prost-reflect.workspace = true
+prost-types.workspace = true
+protox.workspace = true
+serde.workspace = true
+serde_ignored.workspace = true
+serde_json.workspace = true
+serialport.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+toml_edit.workspace = true
+tracing.workspace = true
+miette.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

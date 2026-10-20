@@ -1,0 +1,15 @@
+[package]
+name = "pb-sim"
+description = "ProtoBench device simulator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+pb-core.workspace = true
+crossbeam-channel.workspace = true
+prost-reflect.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+tracing.workspace = true

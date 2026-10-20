@@ -1,0 +1,112 @@
+// Demo amperometric sensor board protocol.
+//
+// Host and device exchange one envelope message per frame. Every frame on the
+// wire is COBS( protobuf_bytes || crc16_ccitt_false_le ) || 0x00.
+syntax = "proto3";
+
+package demo;
+
+import "nanopb.proto";
+
+// Operating state of the analogue front end.
+enum SensorState {
+  // Powered, not measuring.
+  IDLE = 0;
+  // Bias applied, waiting for the electrode to settle.
+  WARMUP = 1;
+  // Streaming valid measurements.
+  MEASURING = 2;
+  // A fault flag is set; see Status.fault_flags.
+  FAULT = 3;
+}
+
+// Liveness check. The device answers with Pong.
+message Ping {}
+
+// Reply to Ping.
+message Pong {
+  // Firmware version string, e.g. "1.4.2".
+  string firmware = 1 [(nanopb).max_size = 16];
+}
+
+// Set the working-electrode bias voltage.
+message SetBias {
+  // Bias in millivolts relative to the reference electrode.
+  int32 millivolts = 1;
+}
+
+// Start or stop the telemetry stream.
+message StreamCtrl {
+  // true starts the stream, false stops it.
+  bool enable = 1;
+  // Requested sample rate in Hz.
+  uint32 rate_hz = 2;
+}
+
+// Ask for a Status message.
+message GetStatus {}
+
+// Erase the stored calibration. Destructive.
+message EraseCal {
+  // Must equal 0xDEAD to take effect.
+  uint32 magic = 1;
+}
+
+// Generic acknowledgement.
+message Ack {
+  // true if the command was accepted.
+  bool ok = 1;
+  // Error code when ok is false.
+  uint32 error_code = 2;
+}
+
+// One sample of the analogue front end.
+message Telemetry {
+  // Device time of the sample in microseconds (free-running 32-bit counter).
+  uint64 timestamp_us = 1;
+  // Output voltage in raw ADC counts (0.0503 mV per count).
+  uint32 vout_raw = 2;
+  // Sensor current in nanoamps.
+  float current_na = 3;
+  // Board temperature in degrees Celsius.
+  float temperature_c = 4;
+  // Raw auxiliary ADC channels.
+  repeated uint32 adc = 5 [(nanopb).max_count = 4];
+  // Front-end state.
+  SensorState state = 6;
+}
+
+// Slow-changing housekeeping data.
+message Status {
+  // Battery voltage in millivolts.
+  uint32 battery_mv = 1;
+  // Seconds since boot.
+  uint32 uptime_s = 2;
+  // Bit field of active faults (0 = none).
+  uint32 fault_flags = 3;
+}
+
+// Everything the host sends.
+message HostToDevice {
+  // Correlation id; the device echoes it in the reply.
+  uint32 seq = 1;
+  oneof cmd {
+    Ping ping = 2;
+    SetBias set_bias = 3;
+    StreamCtrl stream_ctrl = 4;
+    GetStatus get_status = 5;
+    EraseCal erase_cal = 6;
+  }
+}
+
+// Everything the device sends.
+message DeviceToHost {
+  // Echo of HostToDevice.seq for replies; 0 for unsolicited messages.
+  uint32 seq = 1;
+  oneof msg {
+    Pong pong = 2;
+    Ack ack = 3;
+    Telemetry telemetry = 4;
+    Status status = 5;
+  }
+}

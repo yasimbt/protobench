@@ -1,0 +1,49 @@
+name = "Bring-up smoke test"
+description = "Ping, set bias, capture stream, check limits"
+
+[vars]
+bias_mv = 200
+
+[[steps]]
+action = "send"
+command = "Ping"                       # by command name, or message + payload inline
+expect = "pong"
+timeout_ms = 500
+
+[[steps]]
+action = "send"
+message = "set_bias"
+payload = { millivolts = "${bias_mv}" }
+expect = "ack"
+assert = [ { path = "ack.ok", eq = true } ]
+
+[[steps]]
+action = "send"
+command = "Start Stream"
+
+[[steps]]
+action = "capture"
+channels = ["telemetry.vout_raw", "telemetry.current_na"]
+duration_ms = 2000
+assert = [
+  { channel = "telemetry.current_na", stat = "mean", min = 200, max = 300 },
+  { channel = "telemetry.current_na", stat = "std", max = 10 },
+  { channel = "telemetry.vout_raw",  stat = "rate_hz", min = 900 },
+]
+
+[[steps]]
+action = "wait"
+ms = 100
+
+[[steps]]
+action = "prompt_operator"
+message = "Connect the 10 kΩ load and press OK"
+
+[[steps]]
+action = "loop"
+count = 3
+steps = [ { action = "send", command = "Ping", expect = "pong" } ]
+
+[[steps]]
+action = "log"
+text = "Done"

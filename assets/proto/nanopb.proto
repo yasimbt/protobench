@@ -1,0 +1,96 @@
+// Stub of nanopb's generator options (nanopb.proto) bundled with ProtoBench,
+// so that firmware schemas with `import "nanopb.proto";` and options such as
+// `[(nanopb).max_size = 16]` load as-is. Option values only affect nanopb's C
+// code generator; they do not change the wire format, and ProtoBench ignores
+// them. Extension numbers match upstream nanopb (1010).
+syntax = "proto2";
+
+import "google/protobuf/descriptor.proto";
+
+option java_package = "fi.kapsi.koti.jpa.nanopb";
+
+enum FieldType {
+  FT_DEFAULT = 0;
+  FT_CALLBACK = 1;
+  FT_POINTER = 4;
+  FT_STATIC = 2;
+  FT_IGNORE = 3;
+  FT_INLINE = 5;
+}
+
+enum IntSize {
+  IS_DEFAULT = 0;
+  IS_8 = 8;
+  IS_16 = 16;
+  IS_32 = 32;
+  IS_64 = 64;
+}
+
+enum TypenameMangling {
+  M_NONE = 0;
+  M_STRIP_PACKAGE = 1;
+  M_FLATTEN = 2;
+  M_PACKAGE_INITIALS = 3;
+}
+
+enum DescriptorSize {
+  DS_AUTO = 0;
+  DS_1 = 1;
+  DS_2 = 2;
+  DS_4 = 4;
+  DS_8 = 8;
+}
+
+message NanoPBOptions {
+  optional int32 max_size = 1;
+  optional int32 max_length = 14;
+  optional int32 max_count = 2;
+  optional IntSize int_size = 7 [default = IS_DEFAULT];
+  optional bool enum_intsize = 34;
+  optional FieldType type = 3 [default = FT_DEFAULT];
+  optional bool long_names = 4 [default = true];
+  optional bool packed_struct = 5 [default = false];
+  optional bool packed_enum = 10 [default = false];
+  optional bool skip_message = 6 [default = false];
+  optional bool no_unions = 8 [default = false];
+  optional uint32 msgid = 9;
+  optional bool anonymous_oneof = 11 [default = false];
+  optional bool proto3 = 12 [default = false];
+  optional bool proto3_singular_msgs = 21 [default = false];
+  optional bool enum_to_string = 13 [default = false];
+  optional bool enum_validate = 32 [default = false];
+  optional bool fixed_length = 15 [default = false];
+  optional bool fixed_count = 16 [default = false];
+  optional bool submsg_callback = 22 [default = false];
+  optional TypenameMangling mangle_names = 17 [default = M_NONE];
+  optional string callback_datatype = 18 [default = "pb_callback_t"];
+  optional string callback_function = 19 [default = "pb_default_field_callback"];
+  optional DescriptorSize descriptorsize = 20 [default = DS_AUTO];
+  optional bool default_has = 23 [default = false];
+  repeated string include = 24;
+  repeated string exclude = 26;
+  optional string package = 25;
+  optional google.protobuf.FieldDescriptorProto.Type type_override = 27;
+  optional google.protobuf.FieldDescriptorProto.Label label_override = 31;
+  optional bool sort_by_tag = 28 [default = true];
+  optional FieldType fallback_type = 29 [default = FT_CALLBACK];
+  optional bool initializer = 30 [default = true];
+  optional bool discard_unused_automatic_type = 33 [default = false];
+  optional bool discard_deprecated = 35 [default = false];
+}
+
+extend google.protobuf.FileOptions {
+  optional NanoPBOptions nanopb_fileopt = 1010;
+}
+
+extend google.protobuf.MessageOptions {
+  optional NanoPBOptions nanopb_msgopt = 1010;
+}
+
+extend google.protobuf.EnumOptions {
+  optional NanoPBOptions nanopb_enumopt = 1010;
+}
+
+extend google.protobuf.FieldOptions {
+  optional NanoPBOptions nanopb = 1010;
+}

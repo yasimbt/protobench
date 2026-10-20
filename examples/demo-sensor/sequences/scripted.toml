@@ -1,0 +1,43 @@
+name = "Scripted bias sweep"
+description = "Rhai scripts: sweep the bias and check every ack, then judge one second of stream statistics"
+
+[vars]
+sweep = [100, 200, 300]
+
+[[steps]]
+action = "script"
+code = """
+// Sweep the bias and check that the device acknowledges every value.
+let sweep = get_var("sweep");
+for mv in sweep {
+    let r = send("Set Bias", #{ millivolts: mv });
+    check(r.status == "ok" && r.response.ack.ok, `bias ${mv} mV acknowledged`);
+}
+set_var("last_bias", sweep[sweep.len() - 1]);
+"""
+
+[[steps]]
+action = "send"
+command = "Start Stream"
+
+[[steps]]
+action = "script"
+timeout_ms = 10000
+code = """
+// Wait for the first sample, then judge one second of current readings.
+let waited = 0;
+while last("telemetry.current_na") == () && waited < 2000 {
+    sleep(20);
+    waited += 20;
+}
+sleep(1000);
+let s = stats("telemetry.current_na", 1000);
+log(`current: mean ${s.mean} nA, std ${s.std} nA, ${s.count} samples`);
+check(s.count >= 500, "at least 500 samples in one second");
+check(s.mean > 200.0 && s.mean < 300.0, "mean current within 200..300 nA");
+#{ mean_na: s.mean, std_na: s.std }
+"""
+
+[[steps]]
+action = "log"
+text = "Sweep done, bias left at ${last_bias} mV"

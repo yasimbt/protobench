@@ -384,3 +384,23 @@ fn decode_channels_range_and_per_channel() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("no channel `ghost`"));
     let _ = std::fs::remove_dir_all(d);
 }
+
+#[test]
+fn run_scripted_exits_0() {
+    let reports = tmp("scripted");
+    let out = bin()
+        .args(["run", "--project"])
+        .arg(demo())
+        .args(["--sequence", "scripted", "--profile", "sim", "--report-dir"])
+        .arg(&reports)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = std::fs::remove_dir_all(reports);
+}

@@ -266,6 +266,16 @@ impl SeqCheck<'_> {
             Step::Loop { steps, .. } => {
                 self.steps(steps, &format!("{index}."));
             }
+            Step::Script { code, .. } => {
+                if let Err((msg, line)) =
+                    crate::sequence::script::compile_check(code.as_deref().unwrap_or(""))
+                {
+                    let at = line
+                        .map(|l| format!("script line {l}: "))
+                        .unwrap_or_default();
+                    self.err(index, action, format!("{at}{msg}"));
+                }
+            }
             _ => {}
         }
     }
@@ -380,9 +390,26 @@ fn collect_defined(steps: &[Step], out: &mut BTreeSet<String>) {
             }
             Step::Send { save, .. } => out.extend(save.keys().cloned()),
             Step::Loop { steps, .. } => collect_defined(steps, out),
+            Step::Script { code: Some(c), .. } => out.extend(script_set_vars(c)),
             _ => {}
         }
     }
+}
+
+/// Names a script sets with `set_var("name", …)`.
+fn script_set_vars(code: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = code;
+    while let Some(i) = rest.find("set_var(") {
+        rest = &rest[i + "set_var(".len()..];
+        let r = rest.trim_start();
+        if let Some(q) = r.chars().next().filter(|c| *c == '"' || *c == '\'') {
+            if let Some(end) = r[1..].find(q) {
+                out.push(r[1..1 + end].to_string());
+            }
+        }
+    }
+    out
 }
 
 /// True if `name` is a channel the project can produce: a telemetry channel
@@ -570,6 +597,33 @@ steps = [ { action = "expect", message = "teleport" } ]
             "{text:#?}"
         );
         assert_eq!(d.iter().filter(|d| d.is_error()).count(), 5, "{text:#?}");
+    }
+
+    #[test]
+    fn script_steps_are_compiled_and_define_vars() {
+        let p = demo();
+        let src = r#"
+[[steps]]
+action = "script"
+code = """
+set_var("gain", 2);
+"""
+
+[[steps]]
+action = "log"
+text = "gain=${gain}"
+
+[[steps]]
+action = "script"
+code = "let x = ;"
+"#;
+        let d = check_sequence_str(src, Path::new("s.toml"), &p.config, None);
+        let text: Vec<String> = d.iter().map(|d| d.to_string()).collect();
+        assert_eq!(d.len(), 1, "{text:#?}");
+        assert!(
+            text[0].starts_with("s.toml:12: error: step 3 (script): script line 1:"),
+            "{text:#?}"
+        );
     }
 
     #[test]

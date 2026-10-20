@@ -454,7 +454,10 @@ mod tests {
         assert!(p.diagnostics.is_empty(), "{errs:#?}");
         assert!(p.schema.is_some());
         assert_eq!(p.config.connection.profiles.len(), 3);
-        assert_eq!(p.sequence_names(), vec!["smoke".to_string()]);
+        assert_eq!(
+            p.sequence_names(),
+            vec!["scripted".to_string(), "smoke".to_string()]
+        );
     }
 
     #[test]

@@ -418,6 +418,9 @@ impl Ctx<'_> {
                 }
                 Err(e) => Outcome::error(e.to_string()),
             },
+            Step::Script {
+                code, timeout_ms, ..
+            } => self.script(code.as_deref().unwrap_or(""), *timeout_ms),
             Step::PromptOperator { message } => {
                 let msg = interpolate(message, &self.vars).unwrap_or_else(|_| message.clone());
                 match self.prompt.as_mut() {
@@ -544,6 +547,31 @@ impl Ctx<'_> {
                 .map(|a| self.check_channel_last(a))
                 .collect();
         }
+        o.judge()
+    }
+
+    fn script(&mut self, code: &str, timeout_ms: u64) -> Outcome {
+        let env = super::script::ScriptEnv {
+            session: self.session.handle(),
+            config: Arc::new(self.config.clone()),
+            vars: self.vars.clone(),
+            abort: self.abort.clone(),
+            timeout: Duration::from_millis(timeout_ms),
+        };
+        let r = super::script::run_script(code, env);
+        self.vars = r.vars;
+        for line in r.log {
+            self.log_line(line);
+        }
+        let mut o = match (r.error, r.failure) {
+            (Some(e), _) => Outcome::error(e),
+            (None, Some(f)) => Outcome::fail(f),
+            (None, None) => Outcome::pass(),
+        };
+        if let Some(v) = r.result {
+            o.measured.insert("result".into(), v);
+        }
+        o.assertions = r.checks;
         o.judge()
     }
 

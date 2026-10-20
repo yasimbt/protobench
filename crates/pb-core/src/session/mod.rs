@@ -453,26 +453,23 @@ impl Session {
 
     /// Queues a request. The handle yields the outcome.
     pub fn send(&self, req: SendRequest) -> RequestHandle {
-        let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = crossbeam_channel::bounded(1);
-        if self
-            .cmd_tx
-            .send(Cmd::Send {
-                id,
-                req,
-                reply: Some(tx.clone()),
-            })
-            .is_err()
-        {
-            let _ = tx.send(RequestOutcome::Error("session stopped".into()));
-        }
-        RequestHandle { id, rx }
+        queue_send(&self.shared, &self.cmd_tx, req)
     }
 
     /// Sends and waits for the outcome.
     pub fn send_and_wait(&self, req: SendRequest) -> RequestOutcome {
-        let total = req.timeout_ms.saturating_mul(u64::from(req.retries) + 1) + 2000;
-        self.send(req).wait(Duration::from_millis(total))
+        let limit = wait_limit(&req);
+        self.send(req).wait(limit)
+    }
+
+    /// A cloneable `'static` handle for sending and reading telemetry from
+    /// other threads (e.g. sequence scripts).
+    pub fn handle(&self) -> SessionHandle {
+        SessionHandle {
+            shared: self.shared.clone(),
+            cmd_tx: self.cmd_tx.clone(),
+            codec: self.codec.clone(),
+        }
     }
 
     /// Writes raw bytes (no framing).
@@ -593,6 +590,64 @@ impl Session {
             let _ = r.finish();
         }
         self.shared.set_state(ConnState::Disconnected);
+    }
+}
+
+fn queue_send(shared: &Shared, cmd_tx: &Sender<Cmd>, req: SendRequest) -> RequestHandle {
+    let id = shared.next_id.fetch_add(1, Ordering::Relaxed);
+    let (tx, rx) = crossbeam_channel::bounded(1);
+    if cmd_tx
+        .send(Cmd::Send {
+            id,
+            req,
+            reply: Some(tx.clone()),
+        })
+        .is_err()
+    {
+        let _ = tx.send(RequestOutcome::Error("session stopped".into()));
+    }
+    RequestHandle { id, rx }
+}
+
+/// How long to wait for a request: every attempt plus a margin.
+fn wait_limit(req: &SendRequest) -> Duration {
+    Duration::from_millis(req.timeout_ms.saturating_mul(u64::from(req.retries) + 1) + 2000)
+}
+
+/// Cloneable handle to a running [`Session`]. It does not keep the I/O
+/// thread alive: after the session stops, sends fail with "session stopped".
+#[derive(Clone)]
+pub struct SessionHandle {
+    shared: Arc<Shared>,
+    cmd_tx: Sender<Cmd>,
+    codec: Arc<Codec>,
+}
+
+impl SessionHandle {
+    /// Queues a request.
+    pub fn send(&self, req: SendRequest) -> RequestHandle {
+        queue_send(&self.shared, &self.cmd_tx, req)
+    }
+
+    /// Sends and waits for the outcome.
+    pub fn send_and_wait(&self, req: SendRequest) -> RequestOutcome {
+        let limit = wait_limit(&req);
+        self.send(req).wait(limit)
+    }
+
+    /// The session's codec.
+    pub fn codec(&self) -> &Arc<Codec> {
+        &self.codec
+    }
+
+    /// Telemetry channels.
+    pub fn telemetry(&self) -> &Arc<TelemetryStore> {
+        &self.shared.telemetry
+    }
+
+    /// Host time now, in ns on the session clock.
+    pub fn now_ns(&self) -> u64 {
+        self.shared.clock.now_ns()
     }
 }
 

@@ -31,6 +31,7 @@ prost = "0.14.4"
 prost-reflect = { version = "0.16.5", features = ["serde", "text-format"] }
 prost-types = "0.14.4"
 protox = "0.10.0"
+rhai = { version = "1.26", features = ["sync", "serde"] }
 rfd = "0.17.2"
 serde = { version = "1", features = ["derive"] }
 serde_ignored = "0.1"

@@ -146,6 +146,21 @@ pub enum Step {
         /// Instruction.
         message: String,
     },
+    /// Run a Rhai script (see `docs/USER_GUIDE.md`, "Scripts").
+    Script {
+        /// Inline source.
+        code: Option<String>,
+        /// Script file, relative to the sequence file. Its text is loaded
+        /// into `code` when the sequence is parsed.
+        file: Option<String>,
+        /// Wall-clock limit for the whole script.
+        #[serde(default = "default_script_timeout")]
+        timeout_ms: u64,
+    },
+}
+
+fn default_script_timeout() -> u64 {
+    60_000
 }
 
 fn default_expect_timeout() -> u64 {
@@ -168,6 +183,7 @@ impl Step {
             Step::Loop { .. } => "loop",
             Step::Log { .. } => "log",
             Step::PromptOperator { .. } => "prompt_operator",
+            Step::Script { .. } => "script",
         }
     }
 
@@ -202,6 +218,14 @@ impl Step {
             Step::Loop { count, steps } => format!("loop {count}× ({} steps)", steps.len()),
             Step::Log { text } => format!("log {text}"),
             Step::PromptOperator { message } => format!("prompt: {message}"),
+            Step::Script { file: Some(f), .. } => format!("script {f}"),
+            Step::Script { code, .. } => {
+                let first = code
+                    .as_deref()
+                    .and_then(|c| c.lines().map(str::trim).find(|l| !l.is_empty()))
+                    .unwrap_or("");
+                format!("script: {first}")
+            }
         }
     }
 }
@@ -220,6 +244,9 @@ impl SequenceFile {
                 .unwrap_or_default();
         }
         validate_steps(&seq.steps).map_err(|m| Diagnostic::error(file, None, m))?;
+        let base = file.parent().unwrap_or(Path::new("."));
+        load_script_files(&mut seq.steps, base, "")
+            .map_err(|m| Diagnostic::error(file, None, m))?;
         Ok(seq)
     }
 
@@ -228,6 +255,34 @@ impl SequenceFile {
         let src = std::fs::read_to_string(path).map_err(|e| CoreError::io(path, e))?;
         Self::parse(&src, path).map_err(|d| CoreError::Sequence(d.to_string()))
     }
+}
+
+/// Reads the `file` of every script step into its `code`.
+fn load_script_files(steps: &mut [Step], base: &Path, prefix: &str) -> Result<(), String> {
+    for (i, s) in steps.iter_mut().enumerate() {
+        match s {
+            Step::Script {
+                code,
+                file: Some(f),
+                ..
+            } if code.is_none() => {
+                let path = base.join(&*f);
+                let text = std::fs::read_to_string(&path).map_err(|e| {
+                    format!(
+                        "step {prefix}{}: cannot read script `{}`: {e}",
+                        i + 1,
+                        path.display()
+                    )
+                })?;
+                *code = Some(text);
+            }
+            Step::Loop { steps, .. } => {
+                load_script_files(steps, base, &format!("{prefix}{}.", i + 1))?
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn validate_steps(steps: &[Step]) -> Result<(), String> {
@@ -262,6 +317,12 @@ fn validate_steps(steps: &[Step]) -> Result<(), String> {
             {
                 return Err(format!(
                     "step {}: set needs `var` and `value`, or `vars`",
+                    i + 1
+                ));
+            }
+            Step::Script { code, file, .. } if code.is_some() == file.is_some() => {
+                return Err(format!(
+                    "step {}: script needs exactly one of `code` or `file`",
                     i + 1
                 ));
             }

@@ -497,3 +497,20 @@ assert = [ { channel = "telemetry.current_na", stat = "count", min = 100, max = 
     );
     assert!(r.passed, "{}", r.summary_text());
 }
+
+#[test]
+fn scripted_demo_sequence_passes() {
+    let p = demo();
+    let s = start(&p, "sim", None);
+    let seq = pb_core::sequence::SequenceFile::load(&p.sequence_path("scripted")).unwrap();
+    let mut ev = |_e: pb_core::sequence::RunEvent| {};
+    let r = pb_core::sequence::run_sequence(&s, &p.config, &seq, Default::default(), &mut ev, None);
+    assert!(r.passed, "{}\n{:#?}", r.summary_text(), r.steps);
+    assert_eq!(r.steps[0].assertions.len(), 3);
+    let stats = &r.steps[2];
+    assert_eq!(stats.assertions.len(), 2);
+    assert!(stats.measured["result"]["mean_na"].as_f64().unwrap() > 200.0);
+    assert_eq!(r.vars["last_bias"], serde_json::json!(300));
+    assert_eq!(r.log.last().unwrap(), "Sweep done, bias left at 300 mV");
+    assert!(r.log.iter().any(|l| l.starts_with("current: mean")));
+}

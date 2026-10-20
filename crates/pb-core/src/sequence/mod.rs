@@ -4,6 +4,7 @@ mod assert;
 mod model;
 mod report;
 mod runner;
+pub mod script;
 
 pub use assert::{
     check, check_each, check_stat, measure_all, measure_field, AssertionResult, Measured,

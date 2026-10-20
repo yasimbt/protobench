@@ -13,7 +13,8 @@ my-board/
 ├── project.toml        # schema, connections, framing, commands, telemetry, simulator
 ├── proto/*.proto       # the device's schema (compiled at runtime; no protoc needed)
 ├── sequences/*.toml    # test sequences
-├── layout.json         # the dashboard, saved by the GUI
+├── layout.json         # the project's default dashboard
+├── layout.local.json   # your working layout (saved by the GUI; git-ignored)
 ├── recordings/         # session recordings (created on first recording)
 └── reports/            # sequence reports (created by `protobench run`)
 ```
@@ -48,7 +49,7 @@ Opening happens on the connection's I/O thread; the window stays responsive. Wit
 ## Main window
 
 - **Menu bar**: File, Connection, Record, View, Tools, Help.
-- **Dock area**: panels in tabs. Drag a tab to move it, split the area, or drop it as a floating window. Right-click a tab to rename it. Close tabs with ×. **View ▸ Add panel** adds any panel type, as many times as you like. **View ▸ Reset layout** restores the default dashboard. The layout and every panel's settings are saved in `layout.json` in the project folder, so each board opens as you left it.
+- **Dock area**: panels in tabs. Drag a tab to move it, split the area, or drop it as a floating window. Right-click a tab to rename it. Close tabs with ×. **View ▸ Add panel** adds any panel type, as many times as you like. Your arrangement and every panel's settings are saved automatically to `layout.local.json` in the project folder, so each board opens as you left it, while the project's own `layout.json` stays untouched. **View ▸ Save layout as project default** writes the current layout to `layout.json` (to share it through version control); **View ▸ Reset layout** goes back to it.
 - **Status bar**: connection state, endpoint, receive rate (messages/s, bytes/s), transmit rate, error counters (framing, CRC, decode, unknown ID; click to open Link Statistics), a red **● REC** indicator with the elapsed time while recording, and the latest notification.
 - **View ▸ Dark theme** switches the theme; **View ▸ Error panel** shows or hides the Problems panel.
 

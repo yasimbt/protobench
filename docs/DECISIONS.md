@@ -64,7 +64,8 @@ Where the build specification left room, these are the choices made, with the re
 ## GUI
 
 39. **Two Y axes.** egui_plot has one transform per plot, so Y2 traces are linearly mapped into the Y1 range and the right axis labels show Y2 values.
-40. **`layout.json`** is the serialized `egui_dock` state. Rectangles of panes that were never drawn are infinite, which JSON cannot represent, so they are written as 0; they are recomputed on the next frame.
-41. **The smoke test** renders real frames without a display through `egui::Context::run_ui`, driving the same `AppState` actions the buttons call; `--window` repeats the run in a real window. This covers acceptance criteria 4 and 5 in CI environments without a GPU.
-42. **Badges of composer sends** are keyed `composer: <message>`, so they do not overwrite the badges of configured buttons.
-43. **The project editor** updates `[framing]` keys in place (comments survive) but rewrites the `[[connection.profiles]]` array, writing only non-default keys; comments inside profiles are lost. "Save as button" appends with `toml_edit` and keeps everything else.
+40. **Two layout files.** The spec saves the layout per project in `layout.json`, but auto-saving into that file meant that trying out a project (the demo, a project in a firmware repo) changed tracked files. Changes are therefore auto-saved to a git-ignored `layout.local.json`, which is loaded first; `layout.json` is the shared default, written only by **View ▸ Save layout as project default**. Layouts without panels are skipped so a project never opens blank.
+41. **`layout.json`** is the serialized `egui_dock` state. Rectangles of panes that were never drawn are infinite, which JSON cannot represent, so they are written as 0; they are recomputed on the next frame.
+42. **The smoke test** renders real frames without a display through `egui::Context::run_ui`, driving the same `AppState` actions the buttons call; `--window` repeats the run in a real window. This covers acceptance criteria 4 and 5 in CI environments without a GPU.
+43. **Badges of composer sends** are keyed `composer: <message>`, so they do not overwrite the badges of configured buttons.
+44. **The project editor** updates `[framing]` keys in place (comments survive) but rewrites the `[[connection.profiles]]` array, writing only non-default keys; comments inside profiles are lost. "Save as button" appends with `toml_edit` and keeps everything else.

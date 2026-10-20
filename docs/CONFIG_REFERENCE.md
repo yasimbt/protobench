@@ -6,7 +6,8 @@ ProtoBench reads three kinds of files from a project folder:
 |---|---|
 | `project.toml` | Schema, connection profiles, framing, codec, commands, telemetry, simulator |
 | `sequences/<name>.toml` | Test sequences |
-| `layout.json` | GUI dock layout and panel settings (written by the GUI) |
+| `layout.json` | The project's default dashboard: dock layout and panel settings |
+| `layout.local.json` | Your working layout, saved automatically by the GUI (git-ignore it) |
 
 Paths inside `project.toml` are relative to the project folder.
 
@@ -295,9 +296,14 @@ At least one of `eq`, `ne`, `min`, `max` is required.
 
 `protobench run` (and **Save report** in the runner) writes `<sequence>_<YYYYmmdd_HHMMSS>.json` and `.xml`. The JSON holds every step with its index, status (`pass`, `fail`, `error`, `skipped`), duration, message, measured values (reply JSON, latency, attempts, capture statistics) and assertion results, plus the final variables and the log. The JUnit XML has one `<testsuite>` and one `<testcase>` per executed step; loop iterations appear as `7.1.1`, `7.2.1`, …
 
-## `layout.json`
+## `layout.json` and `layout.local.json`
 
-Written by the GUI two seconds after a layout change and on exit; you rarely edit it by hand. Delete it to get the default layout back.
+Both files have the same format.
+
+- `layout.json` is the project's default dashboard and belongs in version control. The GUI writes it only when you choose **View ▸ Save layout as project default**.
+- `layout.local.json` is your working layout. The GUI saves it two seconds after a layout change and on exit, and opens it first next time. Add it to `.gitignore` (**File ▸ New project** does this for you); duplicating a project does not copy it.
+
+On opening a project the GUI uses `layout.local.json`, else `layout.json`, else the built-in dashboard. A file with no panels, or one that fails to parse, is skipped with a notice. **View ▸ Reset layout** goes back to `layout.json`. Delete `layout.local.json` to start from the project default again.
 
 ```json
 { "version": 1, "dock": { ...egui_dock DockState... } }

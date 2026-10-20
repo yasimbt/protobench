@@ -182,7 +182,11 @@ impl Project {
                 dest.display()
             )));
         }
-        copy_dir(&self.dir, dest, &["recordings", "reports", "target"])?;
+        copy_dir(
+            &self.dir,
+            dest,
+            &["recordings", "reports", "target", "layout.local.json"],
+        )?;
         let cfg = dest.join(PROJECT_FILE);
         let text = std::fs::read_to_string(&cfg).map_err(|e| crate::CoreError::io(&cfg, e))?;
         let mut doc: toml_edit::DocumentMut = text
@@ -276,6 +280,10 @@ reply = "pong"
     let write =
         |p: PathBuf, s: &str| std::fs::write(&p, s).map_err(|e| crate::CoreError::io(&p, e));
     write(dir.join("proto/device.proto"), proto)?;
+    write(
+        dir.join(".gitignore"),
+        "# ProtoBench: per-user layout, recordings and reports\nlayout.local.json\nrecordings/\nreports/\n",
+    )?;
     write(cfg.clone(), &toml)?;
     Ok(cfg)
 }

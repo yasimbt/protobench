@@ -7,7 +7,10 @@ use std::time::{Duration, Instant};
 use egui::{Color32, RichText};
 use egui_dock::{DockArea, DockState, Style};
 
-use crate::layout::{default_layout, load_layout, save_layout, Panel, Tab, TabIds};
+use crate::layout::{
+    local_layout_path, project_layout, save_layout, startup_layout, LayoutSource, Panel, Tab,
+    TabIds,
+};
 use crate::panels::Viewer;
 use crate::state::{AppState, Dialog, Settings};
 use crate::tools::{ComposerState, ProjectEditorState, RunnerState, SchemaBrowserState};
@@ -19,8 +22,10 @@ pub enum Action {
     AddPanel(Panel),
     /// Show (or add) the link statistics panel.
     ShowLinkStats,
-    /// Reset to the default layout.
+    /// Go back to the project's `layout.json` (or the built-in default).
     ResetLayout,
+    /// Write the current layout to the project's `layout.json`.
+    SaveProjectLayout,
 }
 
 /// Callback run at the start of every frame.
@@ -90,7 +95,7 @@ impl ProtoBenchApp {
         };
         let mut state = AppState::new(settings);
         state.recent = recent;
-        let dock = default_layout(None);
+        let dock = crate::layout::default_layout(None);
         let ids = TabIds::after(&dock);
         let mut app = ProtoBenchApp {
             state,
@@ -135,21 +140,21 @@ impl ProtoBenchApp {
         let Some(p) = self.state.project.clone() else {
             return;
         };
-        let path = p.layout_path();
-        self.dock = match load_layout(&path) {
-            Ok(Some(d)) => d,
-            Ok(None) => default_layout(Some(&p)),
-            Err(e) => {
-                self.state
-                    .notify(format!("layout: {e}; using the default layout"));
-                default_layout(Some(&p))
-            }
-        };
+        let mut warnings = Vec::new();
+        let (dock, source) = startup_layout(&p, &mut warnings);
+        for w in warnings {
+            self.state.notify(w);
+        }
+        if source == LayoutSource::Default {
+            self.state.notify("using the default dashboard");
+        }
+        self.dock = dock;
         self.ids = TabIds::after(&self.dock);
         self.saved_layout = layout_fingerprint(&self.dock);
     }
 
-    /// Saves `layout.json` if it changed.
+    /// Saves the working layout (`layout.local.json`) if it changed.
+    /// The project's `layout.json` is only written on request.
     pub fn save_layout_now(&mut self) {
         if !self.persist_layout {
             return;
@@ -159,7 +164,7 @@ impl ProtoBenchApp {
         if fp == self.saved_layout {
             return;
         }
-        match save_layout(&p.layout_path(), &self.dock) {
+        match save_layout(&local_layout_path(p), &self.dock) {
             Ok(()) => self.saved_layout = fp,
             Err(e) => self.state.notify(format!("cannot save layout: {e}")),
         }
@@ -187,8 +192,26 @@ impl ProtoBenchApp {
                     }
                 }
                 Action::ResetLayout => {
-                    self.dock = default_layout(self.state.project.as_ref());
+                    let Some(p) = self.state.project.clone() else {
+                        continue;
+                    };
+                    let mut warnings = Vec::new();
+                    self.dock = project_layout(&p, &mut warnings).0;
                     self.ids = TabIds::after(&self.dock);
+                    for w in warnings {
+                        self.state.notify(w);
+                    }
+                }
+                Action::SaveProjectLayout => {
+                    let Some(p) = self.state.project.clone() else {
+                        continue;
+                    };
+                    match save_layout(&p.layout_path(), &self.dock) {
+                        Ok(()) => self
+                            .state
+                            .notify(format!("saved {}", p.layout_path().display())),
+                        Err(e) => self.state.notify(format!("cannot save layout: {e}")),
+                    }
                 }
             }
         }
@@ -449,8 +472,22 @@ impl ProtoBenchApp {
                         }
                     }
                 });
-                if ui.button("Reset layout").clicked() {
+                if ui
+                    .button("Reset layout")
+                    .on_hover_text("Back to the project's layout.json")
+                    .clicked()
+                {
                     self.actions.push(Action::ResetLayout);
+                }
+                if ui
+                    .add_enabled(
+                        self.state.project.is_some(),
+                        egui::Button::new("Save layout as project default"),
+                    )
+                    .on_hover_text("Write the current layout to the project's layout.json")
+                    .clicked()
+                {
+                    self.actions.push(Action::SaveProjectLayout);
                 }
                 if ui
                     .checkbox(&mut self.state.settings.dark, "Dark theme")
@@ -922,6 +959,46 @@ pub fn parse_shortcut(s: &str) -> Option<egui::KeyboardShortcut> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rearranging_writes_only_the_local_layout() {
+        let src = pb_core::project::Project::open(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/demo-sensor"),
+        );
+        let dir = std::env::temp_dir().join(format!("pb-app-layout-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        src.duplicate(&dir, "Copy").unwrap();
+        let project_layout = std::fs::read_to_string(dir.join("layout.json")).unwrap();
+
+        let mut app = ProtoBenchApp::new(None, Some(dir.clone()), None);
+        app.actions.push(Action::AddPanel(Panel::Inspector));
+        app.handle_actions();
+        app.save_layout_now();
+        let local = dir.join(crate::layout::LOCAL_LAYOUT_FILE);
+        assert!(local.exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("layout.json")).unwrap(),
+            project_layout
+        );
+
+        // Reopening restores the working layout; Reset goes back to layout.json.
+        let tabs = app.dock.iter_all_tabs().count();
+        let mut app = ProtoBenchApp::new(None, Some(dir.clone()), None);
+        assert_eq!(app.dock.iter_all_tabs().count(), tabs);
+        app.actions.push(Action::ResetLayout);
+        app.handle_actions();
+        assert_eq!(app.dock.iter_all_tabs().count(), tabs - 1);
+
+        // Only the explicit action writes layout.json.
+        app.actions.push(Action::AddPanel(Panel::Markers));
+        app.actions.push(Action::SaveProjectLayout);
+        app.handle_actions();
+        assert_ne!(
+            std::fs::read_to_string(dir.join("layout.json")).unwrap(),
+            project_layout
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn shortcuts_parse() {

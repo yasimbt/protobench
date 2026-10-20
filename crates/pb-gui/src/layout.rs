@@ -10,6 +10,10 @@ use pb_core::project::Project;
 /// Current `layout.json` format version.
 pub const LAYOUT_VERSION: u32 = 1;
 
+/// Per-user working layout next to `layout.json`; saved automatically and
+/// meant to be git-ignored, so using the GUI never changes the project.
+pub const LOCAL_LAYOUT_FILE: &str = "layout.local.json";
+
 /// Palette for new traces.
 pub const PALETTE: [[u8; 3]; 10] = [
     [0x1f, 0x77, 0xb4],
@@ -450,6 +454,66 @@ pub fn default_layout(project: Option<&Project>) -> DockState<Tab> {
     dock
 }
 
+/// Path of the per-user working layout of a project.
+pub fn local_layout_path(project: &Project) -> std::path::PathBuf {
+    project.dir.join(LOCAL_LAYOUT_FILE)
+}
+
+/// True if the dock holds at least one tab.
+pub fn has_tabs(dock: &DockState<Tab>) -> bool {
+    dock.iter_all_tabs().next().is_some()
+}
+
+/// Where a starting layout came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayoutSource {
+    /// `layout.local.json`.
+    Local,
+    /// `layout.json`.
+    Project,
+    /// Built-in default dashboard.
+    Default,
+}
+
+/// Loads a layout file, treating a layout without tabs like a missing file.
+fn load_usable(path: &Path, warnings: &mut Vec<String>) -> Option<DockState<Tab>> {
+    match load_layout(path) {
+        Ok(Some(d)) if has_tabs(&d) => Some(d),
+        Ok(Some(_)) => {
+            warnings.push(format!("{} has no panels; ignored", path.display()));
+            None
+        }
+        Ok(None) => None,
+        Err(e) => {
+            warnings.push(format!("layout: {e}; ignored"));
+            None
+        }
+    }
+}
+
+/// The project's default layout: `layout.json`, else the built-in dashboard.
+pub fn project_layout(
+    project: &Project,
+    warnings: &mut Vec<String>,
+) -> (DockState<Tab>, LayoutSource) {
+    match load_usable(&project.layout_path(), warnings) {
+        Some(d) => (d, LayoutSource::Project),
+        None => (default_layout(Some(project)), LayoutSource::Default),
+    }
+}
+
+/// The layout a project opens with: `layout.local.json`, else
+/// [`project_layout`].
+pub fn startup_layout(
+    project: &Project,
+    warnings: &mut Vec<String>,
+) -> (DockState<Tab>, LayoutSource) {
+    match load_usable(&local_layout_path(project), warnings) {
+        Some(d) => (d, LayoutSource::Local),
+        None => project_layout(project, warnings),
+    }
+}
+
 /// Loads `layout.json`; `Ok(None)` if missing.
 pub fn load_layout(path: &Path) -> Result<Option<DockState<Tab>>, String> {
     let text = match std::fs::read_to_string(path) {
@@ -542,6 +606,36 @@ mod tests {
         assert!(load_layout(Path::new("/nonexistent/layout.json"))
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn startup_prefers_local_and_skips_empty_layouts() {
+        let src = demo();
+        let dir = std::env::temp_dir().join(format!("pb-layout-pref-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        src.duplicate(&dir, "Copy").unwrap();
+        let p = Project::open(&dir);
+        let mut w = Vec::new();
+        assert_eq!(startup_layout(&p, &mut w).1, LayoutSource::Project);
+
+        // A working layout wins over layout.json.
+        let mut ids = TabIds::default();
+        let local = DockState::new(vec![ids.tab(Panel::Inspector)]);
+        save_layout(&local_layout_path(&p), &local).unwrap();
+        let (d, s) = startup_layout(&p, &mut w);
+        assert_eq!(s, LayoutSource::Local);
+        assert_eq!(d.iter_all_tabs().count(), 1);
+
+        // Empty layouts are ignored with a warning.
+        let empty: DockState<Tab> = DockState::new(Vec::new());
+        save_layout(&local_layout_path(&p), &empty).unwrap();
+        save_layout(&p.layout_path(), &empty).unwrap();
+        let mut w = Vec::new();
+        let (d, s) = startup_layout(&p, &mut w);
+        assert_eq!(s, LayoutSource::Default);
+        assert!(has_tabs(&d));
+        assert_eq!(w.len(), 2, "{w:?}");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

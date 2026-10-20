@@ -407,15 +407,6 @@ pub fn run(
     crate::cmd_run::run(dir, sequence, profile, port, report_dir, non_interactive)
 }
 
-pub fn decode(
-    file: &Path,
-    json: bool,
-    csv: Option<PathBuf>,
-    mcap: Option<PathBuf>,
-) -> Result<ExitCode> {
-    crate::cmd_decode::decode(file, json, csv, mcap)
-}
-
 pub fn sim(dir: &Path, bind: &str, port: u16) -> Result<ExitCode> {
     let p = open_project(dir)?;
     let stop = Arc::new(AtomicBool::new(false));

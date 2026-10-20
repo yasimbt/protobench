@@ -56,21 +56,30 @@ fn run_smoke_exits_0_and_writes_reports() {
     let _ = std::fs::remove_dir_all(reports);
 }
 
-#[test]
-fn failing_sequence_exits_1_and_bad_project_exits_2() {
-    let dir = tmp("proj");
+/// Copies the demo project (one folder level deep) into `dir`.
+fn copy_demo(dir: &Path) {
     for e in std::fs::read_dir(demo()).unwrap().flatten() {
         let p = e.path();
+        let name = e.file_name();
+        if name == "recordings" || name == "reports" {
+            continue;
+        }
         if p.is_dir() {
-            let to = dir.join(e.file_name());
+            let to = dir.join(&name);
             std::fs::create_dir_all(&to).unwrap();
             for f in std::fs::read_dir(&p).unwrap().flatten() {
                 std::fs::copy(f.path(), to.join(f.file_name())).unwrap();
             }
         } else {
-            std::fs::copy(&p, dir.join(e.file_name())).unwrap();
+            std::fs::copy(&p, dir.join(&name)).unwrap();
         }
     }
+}
+
+#[test]
+fn failing_sequence_exits_1_and_bad_project_exits_2() {
+    let dir = tmp("proj");
+    copy_demo(&dir);
     std::fs::write(
         dir.join("sequences/bad.toml"),
         "[[steps]]\naction = \"send\"\ncommand = \"Set Bias\"\nexpect = \"ack\"\nassert = [ { path = \"ack.ok\", eq = false } ]\n",
@@ -214,4 +223,164 @@ fn schema_and_list_ports() {
     assert!(!s.contains("google.protobuf"));
     let out = bin().arg("list-ports").output().unwrap();
     assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
+fn check_demo_passes_and_broken_sequence_fails_with_location() {
+    let out = bin()
+        .args(["check", "--project"])
+        .arg(demo())
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("0 errors"));
+
+    let dir = tmp("check");
+    copy_demo(&dir);
+    std::fs::write(
+        dir.join("sequences/broken.toml"),
+        "name = \"broken\"\n\n[[steps]]\naction = \"send\"\ncommand = \"Pnig\"\n",
+    )
+    .unwrap();
+    let out = bin()
+        .args(["check", "--project"])
+        .arg(&dir)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.lines().any(|l| l.contains("sequences/broken.toml:3: error: step 1 (send): no command `Pnig`")),
+        "{text}"
+    );
+    let out = bin()
+        .args(["check", "--json", "--project"])
+        .arg(&dir)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let j: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(j["errors"], 1);
+    assert_eq!(j["findings"][0]["line"], 3);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn decode_channels_range_and_per_channel() {
+    let d = tmp("decode-opts");
+    let rec = d.join("s.pbsession");
+    let out = bin()
+        .args(["monitor", "--project"])
+        .arg(demo())
+        .args([
+            "--profile",
+            "sim",
+            "--send",
+            "Start Stream",
+            "--duration",
+            "0.6",
+            "--record",
+        ])
+        .arg(&rec)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Full export: the time span of the recording.
+    let all = d.join("all.csv");
+    let out = bin()
+        .arg("decode")
+        .arg(&rec)
+        .arg("--csv")
+        .arg(&all)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let text = std::fs::read_to_string(&all).unwrap();
+    let times: Vec<f64> = text
+        .lines()
+        .skip(1)
+        .filter_map(|l| l.split(',').next()?.parse().ok())
+        .collect();
+    let (t0, t1) = (times[0], *times.last().unwrap());
+    let mid = (t0 + t1) / 2.0;
+
+    let part = d.join("part.csv");
+    let out = bin()
+        .arg("decode")
+        .arg(&rec)
+        .args([
+            "--channels",
+            "telemetry.vout_raw,telemetry.state",
+            "--range",
+        ])
+        .arg(format!("{mid}:"))
+        .arg("--csv")
+        .arg(&part)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = std::fs::read_to_string(&part).unwrap();
+    let mut lines = text.lines();
+    assert_eq!(
+        lines.next().unwrap(),
+        "time_s,telemetry.vout_raw,telemetry.state"
+    );
+    let rows: Vec<f64> = lines
+        .filter_map(|l| l.split(',').next()?.parse().ok())
+        .collect();
+    assert!(
+        !rows.is_empty() && rows.iter().all(|&t| t >= mid),
+        "{rows:?}"
+    );
+    assert!(rows.len() < times.len());
+
+    let per = d.join("per.csv");
+    let out = bin()
+        .arg("decode")
+        .arg(&rec)
+        .args([
+            "--per-channel",
+            "--channels",
+            "telemetry.vout_raw,telemetry.current_na",
+            "--csv",
+        ])
+        .arg(&per)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let written = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(written.matches("wrote ").count(), 2, "{written}");
+
+    let out = bin()
+        .arg("decode")
+        .arg(&rec)
+        .args(["--channels", "ghost", "--csv"])
+        .arg(d.join("x.csv"))
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no channel `ghost`"));
+    let _ = std::fs::remove_dir_all(d);
 }

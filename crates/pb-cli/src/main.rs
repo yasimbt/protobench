@@ -1,6 +1,7 @@
 //! `protobench` command-line interface.
 
 mod cmd;
+mod cmd_check;
 mod cmd_decode;
 mod cmd_run;
 
@@ -129,6 +130,26 @@ enum Command {
         /// Export to MCAP.
         #[arg(long)]
         mcap: Option<PathBuf>,
+        /// Export only these channels (comma-separated; default: all).
+        #[arg(long, value_delimiter = ',')]
+        channels: Vec<String>,
+        /// Export only this time range in seconds, `t0:t1` (either side may
+        /// be empty).
+        #[arg(long, value_name = "T0:T1")]
+        range: Option<String>,
+        /// Write one CSV per channel instead of one joined file.
+        #[arg(long)]
+        per_channel: bool,
+    },
+    /// Check a project for errors: project.toml, schema, sequences and
+    /// layout. Exit code 0 = no errors, 1 = errors.
+    Check {
+        /// Project folder.
+        #[arg(long)]
+        project: PathBuf,
+        /// Print findings as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Run the device simulator as a TCP server.
     Sim {
@@ -202,7 +223,19 @@ fn main() -> ExitCode {
             json,
             csv,
             mcap,
-        } => cmd::decode(&file, json, csv, mcap),
+            channels,
+            range,
+            per_channel,
+        } => cmd_decode::decode(cmd_decode::DecodeArgs {
+            file,
+            json,
+            csv,
+            mcap,
+            channels,
+            range,
+            per_channel,
+        }),
+        Command::Check { project, json } => cmd_check::check(&project, json),
         Command::Sim { project, tcp, bind } => cmd::sim(&project, &bind, tcp),
     };
     match r {

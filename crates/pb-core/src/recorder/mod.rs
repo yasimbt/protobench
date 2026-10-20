@@ -13,8 +13,10 @@
 //! ```
 
 mod csv;
+mod join;
 pub mod mcap_export;
 mod offline;
+mod parquet;
 
 use std::fs::File;
 use std::io::{BufReader, BufWriter, Read, Write};
@@ -22,6 +24,7 @@ use std::path::{Path, PathBuf};
 
 pub use csv::{export_csv, CsvMode};
 pub use offline::{DecodedRecord, OfflineSession};
+pub use parquet::export_parquet;
 
 use crate::error::CoreError;
 use crate::project::Project;

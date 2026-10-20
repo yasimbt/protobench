@@ -439,6 +439,19 @@ impl ProtoBenchApp {
                         );
                     }
                 }
+                if ui
+                    .add_enabled(connected, egui::Button::new("Export Parquet…"))
+                    .on_hover_text("time_s plus one column per channel, joined like the CSV")
+                    .clicked()
+                {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Parquet", &["parquet"])
+                        .set_file_name("channels.parquet")
+                        .save_file()
+                    {
+                        self.state.export_parquet(path);
+                    }
+                }
                 if ui.button("Export recording to MCAP…").clicked() {
                     let start = self.state.project.as_ref().map(|p| p.recordings_dir());
                     let mut d =

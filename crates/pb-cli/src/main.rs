@@ -136,6 +136,9 @@ enum Command {
         /// Export to MCAP.
         #[arg(long)]
         mcap: Option<PathBuf>,
+        /// Export channels to Parquet (joined like the CSV).
+        #[arg(long)]
+        parquet: Option<PathBuf>,
         /// Export only these channels (comma-separated; default: all).
         #[arg(long, value_delimiter = ',')]
         channels: Vec<String>,
@@ -233,6 +236,7 @@ fn main() -> ExitCode {
             json,
             csv,
             mcap,
+            parquet,
             channels,
             range,
             per_channel,
@@ -241,6 +245,7 @@ fn main() -> ExitCode {
             json,
             csv,
             mcap,
+            parquet,
             channels,
             range,
             per_channel,

@@ -443,3 +443,93 @@ fn monitor_serves_foxglove() {
     let _ = child.kill();
     let _ = child.wait();
 }
+
+#[test]
+fn parquet_export_matches_csv() {
+    use arrow_array::{Array, Float64Array};
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+    let d = tmp("parquet");
+    let rec = d.join("s.pbsession");
+    let out = bin()
+        .args(["monitor", "--project"])
+        .arg(demo())
+        .args([
+            "--profile",
+            "sim",
+            "--send",
+            "Start Stream",
+            "--duration",
+            "0.5",
+            "--record",
+        ])
+        .arg(&rec)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let (csv, pq) = (d.join("c.csv"), d.join("c.parquet"));
+    let out = bin()
+        .arg("decode")
+        .arg(&rec)
+        .arg("--csv")
+        .arg(&csv)
+        .arg("--parquet")
+        .arg(&pq)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let text = std::fs::read_to_string(&csv).unwrap();
+    let mut lines = text.lines();
+    let header: Vec<String> = lines
+        .next()
+        .unwrap()
+        .split(',')
+        .map(str::to_string)
+        .collect();
+    let csv_rows: Vec<Vec<Option<f64>>> = lines
+        .map(|l| l.split(',').map(|c| c.parse().ok()).collect())
+        .collect();
+
+    let reader = ParquetRecordBatchReaderBuilder::try_new(std::fs::File::open(&pq).unwrap())
+        .unwrap()
+        .build()
+        .unwrap();
+    let mut names = Vec::new();
+    let mut pq_rows: Vec<Vec<Option<f64>>> = Vec::new();
+    for batch in reader {
+        let batch = batch.unwrap();
+        names = batch
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().clone())
+            .collect();
+        let cols: Vec<&Float64Array> = batch
+            .columns()
+            .iter()
+            .map(|c| c.as_any().downcast_ref::<Float64Array>().unwrap())
+            .collect();
+        for r in 0..batch.num_rows() {
+            pq_rows.push(
+                cols.iter()
+                    .map(|c| (!c.is_null(r)).then(|| c.value(r)))
+                    .collect(),
+            );
+        }
+    }
+    assert_eq!(names, header);
+    assert!(csv_rows.len() > 100);
+    assert_eq!(pq_rows, csv_rows);
+    let _ = std::fs::remove_dir_all(d);
+}

@@ -12,6 +12,8 @@ rust-version = "1.95"
 pb-core = { path = "crates/pb-core" }
 pb-sim = { path = "crates/pb-sim" }
 anyhow = "1.0.104"
+arrow-array = "60"
+arrow-schema = "60"
 base64 = "0.22"
 miette = "7.6"
 chrono = "0.4.45"
@@ -26,6 +28,7 @@ egui_plot = "0.37.0"
 evalexpr = "13.1.0"
 mcap = "0.26.0"
 parking_lot = "0.12.5"
+parquet = { version = "60", default-features = false, features = ["arrow", "snap"] }
 proptest = "1.12.0"
 prost = "0.14.4"
 prost-reflect = { version = "0.16.5", features = ["serde", "text-format"] }

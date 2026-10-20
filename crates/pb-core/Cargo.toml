@@ -5,7 +5,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = ["parquet"]
+# Parquet export (`decode --parquet`, Record > Export Parquet).
+parquet = ["dep:parquet", "dep:arrow-array", "dep:arrow-schema"]
+
 [dependencies]
+arrow-array = { workspace = true, optional = true }
+arrow-schema = { workspace = true, optional = true }
+parquet = { workspace = true, optional = true }
 base64.workspace = true
 chrono.workspace = true
 cobs.workspace = true

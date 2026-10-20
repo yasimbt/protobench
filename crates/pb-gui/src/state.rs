@@ -939,6 +939,23 @@ impl AppState {
         });
     }
 
+    /// Exports channels to Parquet on a background thread.
+    pub fn export_parquet(&mut self, path: PathBuf) {
+        let Some(s) = &self.session else {
+            self.notify("nothing to export: not connected");
+            return;
+        };
+        let store = s.telemetry().clone();
+        let tx = self.jobs();
+        std::thread::spawn(move || {
+            let r = pb_core::recorder::export_parquet(&store, &[], None, &path);
+            let _ = tx.send(match r {
+                Ok(n) => JobResult::Info(format!("exported {n} rows to {}", path.display())),
+                Err(e) => JobResult::Error(e.to_string()),
+            });
+        });
+    }
+
     /// Exports a recording to MCAP on a background thread.
     pub fn export_mcap(&mut self, recording: PathBuf, out: PathBuf) {
         let tx = self.jobs();

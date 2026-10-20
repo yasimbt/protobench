@@ -136,6 +136,16 @@ fn recording_markers_and_csv_export() {
     });
     let text = std::fs::read_to_string(&csv).unwrap();
     assert!(text.starts_with("time_s,telemetry.vout_raw\n"));
+    let pq = dir.join("out.parquet");
+    s.export_parquet(pq.clone());
+    wait(&mut s, |s| {
+        s.notifications
+            .iter()
+            .any(|(_, n)| n.contains("rows to") && n.contains("out.parquet"))
+    });
+    // A Parquet file starts and ends with the `PAR1` magic.
+    let bytes = std::fs::read(&pq).unwrap();
+    assert!(bytes.starts_with(b"PAR1") && bytes.ends_with(b"PAR1"));
     let _ = std::fs::remove_dir_all(dir);
 }
 

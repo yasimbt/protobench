@@ -6,7 +6,7 @@ use std::process::ExitCode;
 
 use anyhow::{anyhow, Result};
 
-use pb_core::recorder::{export_csv, CsvMode, OfflineSession};
+use pb_core::recorder::{export_csv, export_parquet, CsvMode, OfflineSession};
 
 /// Arguments of `decode`.
 pub struct DecodeArgs {
@@ -14,6 +14,7 @@ pub struct DecodeArgs {
     pub json: bool,
     pub csv: Option<PathBuf>,
     pub mcap: Option<PathBuf>,
+    pub parquet: Option<PathBuf>,
     pub channels: Vec<String>,
     pub range: Option<String>,
     pub per_channel: bool,
@@ -49,7 +50,7 @@ pub fn decode(a: DecodeArgs) -> Result<ExitCode> {
             a.file.display()
         );
     }
-    let wants_dump = a.csv.is_none() && a.mcap.is_none() || a.json;
+    let wants_dump = a.csv.is_none() && a.mcap.is_none() && a.parquet.is_none() || a.json;
     if wants_dump {
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
@@ -70,22 +71,31 @@ pub fn decode(a: DecodeArgs) -> Result<ExitCode> {
             }
         }
     }
-    if let Some(path) = &a.csv {
+    let store = if a.csv.is_some() || a.parquet.is_some() {
         let store = off.telemetry(usize::MAX / 4)?;
         for c in &a.channels {
             if store.get(c).is_none() {
                 return Err(anyhow!("no channel `{c}` in this recording"));
             }
         }
+        Some(store)
+    } else {
+        None
+    };
+    if let (Some(path), Some(store)) = (&a.csv, &store) {
         let mode = if a.per_channel {
             CsvMode::PerChannel
         } else {
             CsvMode::Joined
         };
-        let files = export_csv(&store, &a.channels, range, mode, path)?;
+        let files = export_csv(store, &a.channels, range, mode, path)?;
         for f in files {
             eprintln!("wrote {}", f.display());
         }
+    }
+    if let (Some(path), Some(store)) = (&a.parquet, &store) {
+        let rows = export_parquet(store, &a.channels, range, path)?;
+        eprintln!("wrote {} ({rows} rows)", path.display());
     }
     if let Some(path) = &a.mcap {
         let n = pb_core::recorder::mcap_export::export_mcap(&off, path)?;

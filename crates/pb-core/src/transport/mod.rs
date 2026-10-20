@@ -1,1 +1,141 @@
-//! TODO
+//! Transports: byte pipes to a device.
+//!
+//! All transports implement [`Transport`]: a blocking `read` that waits at
+//! most a few milliseconds, and `write_all`. New link types (RTT, BLE, CAN,
+//! MQTT) plug in by implementing the trait and adding a [`connector`] arm.
+
+mod loopback;
+mod net;
+pub mod replay;
+mod serial;
+
+use std::io;
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
+
+pub use loopback::{pair as loopback_pair, LoopbackEnd};
+pub use net::{TcpClient, TcpServer, UdpTransport};
+pub use replay::ReplayTransport;
+pub use serial::{list_ports, pulse, resolve_port, PortInfo, SerialTransport};
+
+use crate::config::{ConnectionProfile, FramingConfig, TransportKind};
+use crate::error::CoreError;
+
+/// How long a `read` may block when no data is available.
+pub const READ_TIMEOUT: Duration = Duration::from_millis(5);
+
+/// A bidirectional byte link.
+pub trait Transport: Send {
+    /// Reads available bytes, blocking at most about [`READ_TIMEOUT`].
+    /// `Ok(0)` means nothing arrived; an error means the link is gone.
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize>;
+    /// Writes all bytes.
+    fn write_all(&mut self, data: &[u8]) -> io::Result<()>;
+    /// Sets DTR (serial only).
+    fn set_dtr(&mut self, _on: bool) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "DTR not supported by this transport",
+        ))
+    }
+    /// Sets RTS (serial only).
+    fn set_rts(&mut self, _on: bool) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "RTS not supported by this transport",
+        ))
+    }
+    /// Short description of the endpoint.
+    fn describe(&self) -> String;
+    /// False while a server transport has no peer.
+    fn has_peer(&self) -> bool {
+        true
+    }
+    /// True if the transport ends by itself (replay at end of file).
+    fn finished(&self) -> bool {
+        false
+    }
+}
+
+/// Opens a transport on demand; called again on reconnect.
+pub type Connector = Box<dyn FnMut() -> Result<Box<dyn Transport>, CoreError> + Send>;
+
+/// Factory for the in-process simulator transport (provided by `pb-sim`).
+pub type SimFactory = Arc<dyn Fn() -> Result<Box<dyn Transport>, CoreError> + Send + Sync>;
+
+/// Builds a connector for a profile. `sim` is required for `transport = "sim"`.
+/// `port_override` replaces the serial port or `host:port` for TCP/UDP.
+pub fn connector(
+    profile: &ConnectionProfile,
+    project_dir: &Path,
+    framing: &FramingConfig,
+    sim: Option<SimFactory>,
+    port_override: Option<String>,
+) -> Result<Connector, CoreError> {
+    let mut p = profile.clone();
+    if let Some(o) = port_override {
+        match p.transport {
+            TransportKind::Serial => p.port = o,
+            TransportKind::TcpClient => match o.rsplit_once(':') {
+                Some((h, port)) => {
+                    p.host = h.to_string();
+                    p.tcp_port = port
+                        .parse()
+                        .map_err(|_| CoreError::Transport(format!("bad port in `{o}`")))?;
+                }
+                None => {
+                    p.tcp_port = o
+                        .parse()
+                        .map_err(|_| CoreError::Transport(format!("bad port `{o}`")))?
+                }
+            },
+            TransportKind::TcpServer => {
+                p.tcp_port = o
+                    .parse()
+                    .map_err(|_| CoreError::Transport(format!("bad port `{o}`")))?
+            }
+            TransportKind::Udp => p.target = Some(o),
+            TransportKind::Replay => p.file = Some(o),
+            TransportKind::Sim => {}
+        }
+    }
+    Ok(match p.transport {
+        TransportKind::Serial => {
+            Box::new(move || Ok(Box::new(SerialTransport::open(&p)?) as Box<dyn Transport>))
+        }
+        TransportKind::TcpClient => Box::new(move || {
+            Ok(Box::new(TcpClient::connect(&p.host, p.tcp_port)?) as Box<dyn Transport>)
+        }),
+        TransportKind::TcpServer => {
+            let bind = p.bind.clone().unwrap_or_else(|| "0.0.0.0".into());
+            let port = p.tcp_port;
+            Box::new(move || Ok(Box::new(TcpServer::bind(&bind, port)?) as Box<dyn Transport>))
+        }
+        TransportKind::Udp => {
+            let bind = p.bind.clone().unwrap_or_else(|| "0.0.0.0:0".into());
+            let target = p.target.clone();
+            Box::new(move || {
+                Ok(Box::new(UdpTransport::bind(&bind, target.as_deref())?) as Box<dyn Transport>)
+            })
+        }
+        TransportKind::Sim => {
+            let f = sim.ok_or_else(|| {
+                CoreError::Transport("simulator transport is not available in this build".into())
+            })?;
+            Box::new(move || f())
+        }
+        TransportKind::Replay => {
+            let file = p
+                .file
+                .clone()
+                .ok_or_else(|| CoreError::Transport("replay profile needs `file`".into()))?;
+            let path = project_dir.join(file);
+            let speed = p.speed;
+            let framing = framing.clone();
+            Box::new(move || {
+                Ok(Box::new(ReplayTransport::open(&path, speed, &framing)?) as Box<dyn Transport>)
+            })
+        }
+    })
+}

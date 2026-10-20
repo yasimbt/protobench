@@ -171,6 +171,17 @@ pub enum FlowControl {
     Hardware,
 }
 
+/// Modem line used for "pulse reset".
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResetLine {
+    /// DTR.
+    #[default]
+    Dtr,
+    /// RTS.
+    Rts,
+}
+
 /// `[[connection.profiles]]`
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -203,6 +214,8 @@ pub struct ConnectionProfile {
     pub auto_reconnect: bool,
     /// Duration of the "pulse reset" action.
     pub reset_pulse_ms: u64,
+    /// Modem line toggled by "pulse reset".
+    pub reset_line: ResetLine,
     /// Remote host for `tcp_client`.
     pub host: String,
     /// TCP port for `tcp_client` and `tcp_server`.
@@ -234,6 +247,7 @@ impl Default for ConnectionProfile {
             rts_on_open: false,
             auto_reconnect: true,
             reset_pulse_ms: 100,
+            reset_line: ResetLine::Dtr,
             host: "127.0.0.1".into(),
             tcp_port: 9000,
             bind: None,

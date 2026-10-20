@@ -308,3 +308,93 @@ fn stored_samples_are_time_ordered_and_smooth() {
         assert!((w[1].1 - w[0].1).abs() < 1.0, "jump {:?}", w);
     }
 }
+
+fn record_some(p: &Project, ms: u64) -> std::path::PathBuf {
+    let s = start(p, "sim", None);
+    let path = std::env::temp_dir().join(format!("pb-it-{}-{ms}.pbsession", std::process::id()));
+    s.start_recording(Box::new(
+        pb_core::recorder::SessionWriter::create(&path, p).unwrap(),
+    ));
+    assert!(send(&s, p, "Start Stream").is_ok());
+    std::thread::sleep(Duration::from_millis(ms));
+    s.add_marker("m1");
+    s.stop_recording().unwrap().finish().unwrap();
+    path
+}
+
+#[test]
+fn replay_transport_plays_back_a_recording() {
+    let p = demo();
+    let path = record_some(&p, 300);
+    let off = pb_core::recorder::OfflineSession::open(&path).unwrap();
+    let rx = off
+        .records
+        .iter()
+        .filter(|r| r.kind == pb_core::session::RecordKind::RxFrame)
+        .count();
+    let mut prof = p.config.profile("sim").unwrap().clone();
+    prof.transport = pb_core::config::TransportKind::Replay;
+    prof.file = Some(path.display().to_string());
+    prof.speed = 0.0;
+    prof.auto_reconnect = false;
+    let conn = connector(&prof, &p.dir, &p.config.framing, None, None).unwrap();
+    let mut params = SessionParams::new(&p, &prof).unwrap();
+    params.auto_reconnect = false;
+    let s = Session::start(params, conn, pb_core::clock::SystemClock::shared()).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while s.state() != ConnState::Finished && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(s.state(), ConnState::Finished);
+    assert_eq!(s.shared().counters.snapshot().rx_msgs as usize, rx);
+    assert!(s.telemetry().get("telemetry.vout_raw").unwrap().total() > 200);
+    // Real-time replay takes about as long as the recording.
+    prof.speed = 1.0;
+    let mut r = pb_core::transport::ReplayTransport::open(&path, 1.0, &p.config.framing).unwrap();
+    use pb_core::transport::Transport;
+    let t0 = std::time::Instant::now();
+    let mut buf = vec![0u8; 4096];
+    while !r.finished() {
+        r.read(&mut buf).unwrap();
+    }
+    assert!(
+        t0.elapsed() >= Duration::from_millis(200),
+        "{:?}",
+        t0.elapsed()
+    );
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn mcap_export_has_one_channel_per_type() {
+    let p = demo();
+    let path = record_some(&p, 200);
+    let off = pb_core::recorder::OfflineSession::open(&path).unwrap();
+    let out = path.with_extension("mcap");
+    let n = pb_core::recorder::mcap_export::export_mcap(&off, &out).unwrap();
+    assert!(n > 100);
+    let bytes = std::fs::read(&out).unwrap();
+    let mut topics = std::collections::BTreeMap::<String, usize>::new();
+    let mut last_time = 0;
+    for m in mcap::MessageStream::new(&bytes).unwrap() {
+        let m = m.unwrap();
+        *topics.entry(m.channel.topic.clone()).or_default() += 1;
+        if m.channel.topic == "/rx/telemetry" {
+            let schema = m.channel.schema.as_ref().unwrap();
+            assert_eq!(schema.name, "demo.Telemetry");
+            assert_eq!(schema.encoding, "protobuf");
+            assert_eq!(m.channel.message_encoding, "protobuf");
+            assert!(m.log_time >= last_time);
+            last_time = m.log_time;
+            // Payload decodes as the schema type.
+            let desc = off.schema.message("demo.Telemetry").unwrap();
+            prost_reflect::DynamicMessage::decode(desc, m.data.as_ref()).unwrap();
+        }
+    }
+    assert!(topics["/rx/telemetry"] > 100, "{topics:?}");
+    assert!(topics.contains_key("/tx/stream_ctrl"), "{topics:?}");
+    assert!(topics.contains_key("/rx/ack"), "{topics:?}");
+    assert!(topics.contains_key("/markers"), "{topics:?}");
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(out);
+}

@@ -93,10 +93,13 @@ impl Channel {
     }
 }
 
+/// Channels in creation order plus a name index.
+type ChannelIndex = (Vec<Arc<Channel>>, HashMap<String, usize>);
+
 /// All channels of a session, shared between the I/O thread and readers.
 #[derive(Debug)]
 pub struct TelemetryStore {
-    channels: RwLock<(Vec<Arc<Channel>>, HashMap<String, usize>)>,
+    channels: RwLock<ChannelIndex>,
     capacity: AtomicUsize,
     generation: AtomicU64,
 }

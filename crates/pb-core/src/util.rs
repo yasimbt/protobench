@@ -74,7 +74,7 @@ pub fn parse_hex(s: &str) -> Result<Vec<u8>, String> {
         .split(|c: char| c.is_whitespace() || c == ',')
         .map(|t| t.trim_start_matches("0x").trim_start_matches("0X"))
         .collect();
-    if cleaned.len() % 2 != 0 {
+    if !cleaned.len().is_multiple_of(2) {
         return Err(format!("odd number of hex digits in {s:?}"));
     }
     (0..cleaned.len())

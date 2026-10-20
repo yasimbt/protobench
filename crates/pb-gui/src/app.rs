@@ -23,6 +23,9 @@ pub enum Action {
     ResetLayout,
 }
 
+/// Callback run at the start of every frame.
+pub type FrameHook = Box<dyn FnMut(&mut ProtoBenchApp, &egui::Context)>;
+
 /// Which tool windows are open.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Windows {
@@ -65,7 +68,7 @@ pub struct ProtoBenchApp {
     /// Write `layout.json` when the layout changes (off in the smoke test).
     pub persist_layout: bool,
     /// Optional hook run every frame (used by `--smoke-test`).
-    pub hook: Option<Box<dyn FnMut(&mut ProtoBenchApp, &egui::Context)>>,
+    pub hook: Option<FrameHook>,
 }
 
 const STORAGE_SETTINGS: &str = "protobench.settings";
@@ -904,9 +907,9 @@ pub fn parse_shortcut(s: &str) -> Option<egui::KeyboardShortcut> {
     let mut key = None;
     for part in s.split('+').map(str::trim) {
         match part.to_ascii_lowercase().as_str() {
-            "ctrl" | "control" | "cmd" => mods = mods | egui::Modifiers::COMMAND,
-            "shift" => mods = mods | egui::Modifiers::SHIFT,
-            "alt" => mods = mods | egui::Modifiers::ALT,
+            "ctrl" | "control" | "cmd" => mods |= egui::Modifiers::COMMAND,
+            "shift" => mods |= egui::Modifiers::SHIFT,
+            "alt" => mods |= egui::Modifiers::ALT,
             _ => {
                 key = egui::Key::from_name(part)
                     .or_else(|| egui::Key::from_name(&part.to_ascii_uppercase()))

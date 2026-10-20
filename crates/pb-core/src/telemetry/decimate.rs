@@ -2,6 +2,15 @@
 
 use super::RingBuffer;
 
+/// Extremes of one pixel column.
+struct Bucket {
+    col: i64,
+    min: (f64, f64),
+    max: (f64, f64),
+    imin: usize,
+    imax: usize,
+}
+
 /// Returns the points of `ring` in `[t0, t1]` reduced to at most two points
 /// (min and max, in time order) per pixel column. One sample on each side of
 /// the window is included so lines reach the plot edges. When the window
@@ -27,9 +36,15 @@ pub fn decimate_minmax(ring: &RingBuffer, t0: f64, t1: f64, columns: usize) -> V
     let span = (t1 - t0).max(f64::MIN_POSITIVE);
     let width = span / columns as f64;
     let mut out = Vec::with_capacity(2 * columns + 4);
-    let mut bucket: Option<(i64, (f64, f64), (f64, f64), usize, usize)> = None;
-    let flush = |out: &mut Vec<[f64; 2]>, b: (i64, (f64, f64), (f64, f64), usize, usize)| {
-        let (_, min, max, imin, imax) = b;
+    let mut bucket: Option<Bucket> = None;
+    let flush = |out: &mut Vec<[f64; 2]>, b: Bucket| {
+        let Bucket {
+            min,
+            max,
+            imin,
+            imax,
+            ..
+        } = b;
         if imin == imax {
             out.push([min.0, min.1]);
         } else if imin < imax {
@@ -44,21 +59,27 @@ pub fn decimate_minmax(ring: &RingBuffer, t0: f64, t1: f64, columns: usize) -> V
         let Some((t, v)) = ring.get(i) else { continue };
         let col = ((t - t0) / width).floor() as i64;
         match &mut bucket {
-            Some(b) if b.0 == col => {
-                if v < b.1 .1 {
-                    b.1 = (t, v);
-                    b.3 = i;
+            Some(b) if b.col == col => {
+                if v < b.min.1 {
+                    b.min = (t, v);
+                    b.imin = i;
                 }
-                if v > b.2 .1 {
-                    b.2 = (t, v);
-                    b.4 = i;
+                if v > b.max.1 {
+                    b.max = (t, v);
+                    b.imax = i;
                 }
             }
             _ => {
                 if let Some(b) = bucket.take() {
                     flush(&mut out, b);
                 }
-                bucket = Some((col, (t, v), (t, v), i, i));
+                bucket = Some(Bucket {
+                    col,
+                    min: (t, v),
+                    max: (t, v),
+                    imin: i,
+                    imax: i,
+                });
             }
         }
     }

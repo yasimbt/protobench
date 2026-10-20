@@ -163,7 +163,7 @@ pub fn load_config_str(src: &str, file: &Path) -> LoadedConfig {
         Some(_) => {
             diagnostics.push(Diagnostic::error(
                 file,
-                locate_line(src, &key_path!["config_version"]),
+                locate_line(src, &[Seg::from("config_version")]),
                 "config_version must be a non-negative integer",
             ));
             return LoadedConfig {
@@ -176,7 +176,7 @@ pub fn load_config_str(src: &str, file: &Path) -> LoadedConfig {
     if version > CONFIG_VERSION {
         diagnostics.push(Diagnostic::error(
             file,
-            locate_line(src, &key_path!["config_version"]),
+            locate_line(src, &[Seg::from("config_version")]),
             format!(
                 "config_version {version} is newer than this tool supports ({CONFIG_VERSION}); upgrade ProtoBench"
             ),

@@ -674,7 +674,6 @@ impl Worker {
         let mut backoff_ms: u64 = 100;
         let mut next_attempt_ns: u64 = 0;
         let mut attempts: u32 = 0;
-        let mut ever_connected = false;
         let mut gave_up = false;
         let mut finished = false;
         let mut buf = vec![0u8; 64 * 1024];
@@ -718,7 +717,6 @@ impl Worker {
                         transport = Some(t);
                         attempts = 0;
                         backoff_ms = 100;
-                        ever_connected = true;
                         self.shared.set_state(ConnState::Connected);
                     }
                     Err(e) => {
@@ -728,16 +726,9 @@ impl Worker {
                             self.shared.set_state(ConnState::Failed(e.to_string()));
                         } else {
                             LinkCounters::add(&self.shared.counters.reconnects, 1);
-                            self.shared.set_state(if ever_connected || attempts > 1 {
-                                ConnState::Reconnecting {
-                                    attempt: attempts,
-                                    error: e.to_string(),
-                                }
-                            } else {
-                                ConnState::Reconnecting {
-                                    attempt: attempts,
-                                    error: e.to_string(),
-                                }
+                            self.shared.set_state(ConnState::Reconnecting {
+                                attempt: attempts,
+                                error: e.to_string(),
                             });
                             next_attempt_ns = now + backoff_ms * 1_000_000;
                             backoff_ms = (backoff_ms * 2).min(2000);

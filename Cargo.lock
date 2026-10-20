@@ -2350,6 +2350,7 @@ name = "pb-sim"
 version = "0.1.0"
 dependencies = [
  "crossbeam-channel",
+ "mcap",
  "pb-core",
  "prost-reflect",
  "serde_json",

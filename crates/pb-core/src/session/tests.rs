@@ -304,3 +304,162 @@ fn periodic_send_repeats_until_stopped() {
     std::thread::sleep(Duration::from_millis(50));
     assert_eq!(s.shared().counters.snapshot().tx_frames, n);
 }
+
+fn wait_state(s: &Session, want: &ConnState, ms: u64) -> ConnState {
+    let deadline = std::time::Instant::now() + Duration::from_millis(ms);
+    loop {
+        let st = s.state();
+        if &st == want || std::time::Instant::now() >= deadline {
+            return st;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+/// Answers one ping with a pong on a TCP client socket.
+fn answer_ping(stream: &mut std::net::TcpStream, p: &Project) {
+    use std::io::{Read, Write};
+    let codec = Codec::new(&p.config, p.schema.as_ref().unwrap(), Role::Device).unwrap();
+    let mut framer = build_framer(&p.config.framing);
+    let seq_path = FieldPath::parse("seq").unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    let mut buf = [0u8; 1024];
+    let mut ev = Vec::new();
+    loop {
+        let n = stream.read(&mut buf).unwrap();
+        assert!(n > 0, "host closed");
+        framer.push(&buf[..n], &mut ev);
+        for e in ev.drain(..) {
+            let FrameEvent::Frame(f) = e else { continue };
+            let req = codec.decode(&f, 0).unwrap();
+            let seq = get_int_at_path(&req.msg, &seq_path).unwrap_or(0);
+            let t = codec.resolve_tx("pong").unwrap();
+            let mut m = codec.build(&t, serde_json::json!({})).unwrap();
+            set_int_at_path(&mut m, &seq_path, seq);
+            stream
+                .write_all(&framer.encode(&codec.encode(&m).unwrap()))
+                .unwrap();
+            return;
+        }
+    }
+}
+
+/// R5: a TCP server tracks its client. Without one the session is
+/// Listening and sends fail; losing the client fails pending requests and
+/// resets the framer so a half frame from the old client cannot corrupt the
+/// next client's first frame.
+#[test]
+fn tcp_server_tracks_client_changes() {
+    use std::io::Write;
+    let p = project();
+    let server = crate::transport::TcpServer::bind("127.0.0.1", 0).unwrap();
+    let addr = server.local_addr().unwrap();
+    let mut server = Some(server);
+    let connector: Connector = Box::new(move || {
+        server
+            .take()
+            .map(|t| Box::new(t) as Box<dyn Transport>)
+            .ok_or_else(|| CoreError::Transport("used".into()))
+    });
+    let profile = p.config.profile("sim").unwrap().clone();
+    let mut params = SessionParams::new(&p, &profile).unwrap();
+    params.auto_reconnect = false;
+    let s = Session::start(params, connector, SystemClock::shared()).unwrap();
+    assert_eq!(
+        wait_state(&s, &ConnState::Listening, 2000),
+        ConnState::Listening
+    );
+    assert_eq!(s.state().label(), "Waiting for client");
+    let out = s.send_and_wait(cmd(&s, &p, "Ping"));
+    assert!(
+        matches!(out, RequestOutcome::Error(ref m) if m == "no client connected"),
+        "{out:?}"
+    );
+
+    // First client: leaves a pending request and half a frame behind.
+    let mut c1 = std::net::TcpStream::connect(addr).unwrap();
+    assert_eq!(
+        wait_state(&s, &ConnState::Connected, 2000),
+        ConnState::Connected
+    );
+    let mut ping = cmd(&s, &p, "Ping");
+    ping.timeout_ms = 5000;
+    ping.retries = 0;
+    let pending = s.send(ping);
+    c1.write_all(&[0x05, 0x08, 0x01]).unwrap(); // start of a COBS frame
+    std::thread::sleep(Duration::from_millis(50));
+    drop(c1);
+    assert_eq!(
+        wait_state(&s, &ConnState::Listening, 2000),
+        ConnState::Listening
+    );
+    let out = pending.wait(Duration::from_secs(2));
+    assert!(
+        matches!(out, RequestOutcome::Error(ref m) if m == "client disconnected"),
+        "{out:?}"
+    );
+
+    // Second client answers normally.
+    let mut c2 = std::net::TcpStream::connect(addr).unwrap();
+    assert_eq!(
+        wait_state(&s, &ConnState::Connected, 2000),
+        ConnState::Connected
+    );
+    let p2 = p.clone();
+    let dev = std::thread::spawn(move || answer_ping(&mut c2, &p2));
+    let out = s.send_and_wait(cmd(&s, &p, "Ping"));
+    assert!(out.is_ok(), "{out:?}");
+    dev.join().unwrap();
+    let st = s.shared().counters.snapshot();
+    assert_eq!(st.framing_errors + st.crc_errors, 0, "{st:?}");
+}
+
+/// R6: a TCP peer that stops reading no longer blocks the I/O thread; the
+/// write times out and the link is reported lost.
+#[test]
+fn stalled_tcp_peer_times_out_instead_of_hanging() {
+    let p = project();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    // Accept and never read.
+    let hold = std::thread::spawn(move || {
+        let (sock, _) = listener.accept().unwrap();
+        std::thread::sleep(Duration::from_secs(4));
+        drop(sock);
+    });
+    let profile = p.config.profile("sim").unwrap().clone();
+    let mut params = SessionParams::new(&p, &profile).unwrap();
+    params.auto_reconnect = false;
+    let connector: Connector = Box::new(move || {
+        crate::transport::TcpClient::connect(&addr.ip().to_string(), addr.port())
+            .map(|t| Box::new(t) as Box<dyn Transport>)
+    });
+    let mut s = Session::start(params, connector, SystemClock::shared()).unwrap();
+    assert_eq!(
+        s.wait_connected(Duration::from_secs(2)),
+        ConnState::Connected
+    );
+    // Far more than the socket buffers hold.
+    for _ in 0..16 {
+        s.send_raw(vec![0x55; 4 << 20]);
+    }
+    let t0 = std::time::Instant::now();
+    let st = loop {
+        let st = s.state();
+        if matches!(st, ConnState::Failed(_)) || t0.elapsed() > Duration::from_secs(6) {
+            break st;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(
+        matches!(&st, ConnState::Failed(m) if m.contains("peer stopped reading")),
+        "{st:?}"
+    );
+    // The I/O thread is free: stopping returns promptly.
+    let t1 = std::time::Instant::now();
+    s.stop();
+    assert!(t1.elapsed() < Duration::from_secs(1));
+    hold.join().unwrap();
+}

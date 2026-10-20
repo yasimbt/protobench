@@ -4,7 +4,7 @@ use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use std::time::Duration;
 
-use super::{Transport, READ_TIMEOUT};
+use super::{Transport, READ_TIMEOUT, WRITE_TIMEOUT};
 use crate::error::CoreError;
 
 fn is_timeout(e: &io::Error) -> bool {
@@ -33,6 +33,7 @@ impl TcpClient {
             match TcpStream::connect_timeout(&a, Duration::from_secs(2)) {
                 Ok(stream) => {
                     stream.set_read_timeout(Some(READ_TIMEOUT))?;
+                    stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
                     stream.set_nodelay(true)?;
                     return Ok(TcpClient { stream, peer });
                 }
@@ -61,7 +62,18 @@ impl Transport for TcpClient {
         }
     }
     fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
-        self.stream.write_all(data)
+        // A timed-out write may have sent part of a frame, so the stream is
+        // no longer usable: report a lost link and reconnect.
+        self.stream.write_all(data).map_err(|e| {
+            if is_timeout(&e) {
+                io::Error::new(
+                    io::ErrorKind::ConnectionAborted,
+                    format!("peer stopped reading (write blocked for {WRITE_TIMEOUT:?})"),
+                )
+            } else {
+                e
+            }
+        })
     }
     fn describe(&self) -> String {
         format!("tcp://{}", self.peer)
@@ -97,6 +109,7 @@ impl TcpServer {
             Ok((s, addr)) => {
                 s.set_nonblocking(false)?;
                 s.set_read_timeout(Some(READ_TIMEOUT))?;
+                s.set_write_timeout(Some(WRITE_TIMEOUT))?;
                 s.set_nodelay(true)?;
                 tracing::info!("tcp server: client {addr} connected");
                 self.client = Some((s, addr));
@@ -135,14 +148,23 @@ impl Transport for TcpServer {
     }
     fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
         match self.client.as_mut() {
-            Some((s, _)) => {
-                if s.write_all(data).is_err() {
+            Some((s, addr)) => match s.write_all(data) {
+                Ok(()) => Ok(()),
+                // A failed or timed-out write drops this client; the server
+                // keeps listening for the next one.
+                Err(e) => {
+                    tracing::info!("tcp server: dropping client {addr}: {e}");
                     self.client = None;
+                    Err(io::Error::new(
+                        io::ErrorKind::NotConnected,
+                        format!("client dropped: {e}"),
+                    ))
                 }
-                Ok(())
-            }
-            // No client yet: data is dropped, like an unplugged cable.
-            None => Ok(()),
+            },
+            None => Err(io::Error::new(
+                io::ErrorKind::NotConnected,
+                "no client connected",
+            )),
         }
     }
     fn describe(&self) -> String {

@@ -1,10 +1,11 @@
 //! Executes a sequence against a live session.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crossbeam_channel::Receiver;
 use serde_json::Value as Json;
 
 use super::assert::{
@@ -59,6 +60,88 @@ pub struct RunOptions {
     pub abort: Arc<AtomicBool>,
 }
 
+/// Most messages kept for `expect` steps.
+const INBOX_MAX: usize = 50_000;
+
+/// Received messages buffered for `expect` steps. One subscription lives for
+/// the whole run, so a reply that arrives before its `expect` step starts
+/// (e.g. right after a fire-and-forget `send`) is not missed.
+struct Inbox {
+    rx: Receiver<SessionEvent>,
+    msgs: VecDeque<Arc<DecodedMessage>>,
+    /// Replies already used by `send` steps that have not been received
+    /// from the subscription yet; they are skipped when they arrive.
+    claimed: Vec<Arc<DecodedMessage>>,
+}
+
+impl Inbox {
+    fn new(rx: Receiver<SessionEvent>) -> Self {
+        Inbox {
+            rx,
+            msgs: VecDeque::new(),
+            claimed: Vec::new(),
+        }
+    }
+
+    /// Buffers a received message; returns it unless it was already claimed.
+    fn accept(&mut self, ev: SessionEvent) -> Option<Arc<DecodedMessage>> {
+        let SessionEvent::Message {
+            dir: Direction::Rx,
+            msg,
+        } = ev
+        else {
+            return None;
+        };
+        if let Some(i) = self.claimed.iter().position(|c| Arc::ptr_eq(c, &msg)) {
+            self.claimed.swap_remove(i);
+            return None;
+        }
+        if self.msgs.len() >= INBOX_MAX {
+            self.msgs.pop_front();
+        }
+        self.msgs.push_back(msg.clone());
+        Some(msg)
+    }
+
+    /// Moves everything queued on the subscription into the buffer.
+    fn drain(&mut self) {
+        while let Ok(ev) = self.rx.try_recv() {
+            self.accept(ev);
+        }
+    }
+
+    /// Marks a message as used so no `expect` step matches it.
+    fn claim(&mut self, msg: &Arc<DecodedMessage>) {
+        if let Some(i) = self.msgs.iter().position(|m| Arc::ptr_eq(m, msg)) {
+            self.msgs.remove(i);
+        } else {
+            if self.claimed.len() >= 1000 {
+                self.claimed.remove(0);
+            }
+            self.claimed.push(msg.clone());
+        }
+    }
+
+    /// Drops messages received before `ns`; no step can match them anymore.
+    fn prune(&mut self, ns: u64) {
+        self.msgs.retain(|m| m.host_ts_ns >= ns);
+    }
+
+    /// Removes and returns the oldest message received at or after `since`
+    /// that satisfies `pred`.
+    fn take(
+        &mut self,
+        since: u64,
+        pred: impl Fn(&DecodedMessage) -> bool,
+    ) -> Option<Arc<DecodedMessage>> {
+        let i = self
+            .msgs
+            .iter()
+            .position(|m| m.host_ts_ns >= since && pred(m))?;
+        self.msgs.remove(i)
+    }
+}
+
 struct Ctx<'a> {
     session: &'a Session,
     config: &'a ProjectConfig,
@@ -71,6 +154,12 @@ struct Ctx<'a> {
     prompt: Option<PromptFn<'a>>,
     headless: NonInteractive,
     abort: Arc<AtomicBool>,
+    inbox: Inbox,
+    /// Session time when the current step started.
+    step_start_ns: u64,
+    /// Session time when the previous step started: `expect` matches
+    /// messages received since then.
+    prev_step_start_ns: u64,
 }
 
 struct Outcome {
@@ -150,6 +239,9 @@ pub fn run_sequence<'a>(
             .or(seq.non_interactive)
             .unwrap_or(NonInteractive::Fail),
         abort: opts.abort,
+        inbox: Inbox::new(session.subscribe()),
+        step_start_ns: session.now_ns(),
+        prev_step_start_ns: session.now_ns(),
     };
     ctx.run_steps(&seq.steps, "");
     let aborted = ctx.abort.load(Ordering::Relaxed);
@@ -221,6 +313,10 @@ impl Ctx<'_> {
             label: label.clone(),
         });
         let t = Instant::now();
+        self.prev_step_start_ns = self.step_start_ns;
+        self.step_start_ns = self.session.now_ns();
+        self.inbox.drain();
+        self.inbox.prune(self.prev_step_start_ns);
         let out = self.exec(step);
         if matches!(out.status, StepStatus::Fail | StepStatus::Error) {
             self.failed = true;
@@ -239,13 +335,15 @@ impl Ctx<'_> {
         self.steps.push(r);
     }
 
-    /// Sleeps up to `d`, returning false if aborted.
-    fn sleep(&self, d: Duration) -> bool {
+    /// Sleeps up to `d`, returning false if aborted. Keeps the inbox
+    /// drained so the subscription queue never fills.
+    fn sleep(&mut self, d: Duration) -> bool {
         let end = Instant::now() + d;
         while Instant::now() < end {
             if self.abort.load(Ordering::Relaxed) {
                 return false;
             }
+            self.inbox.drain();
             std::thread::sleep((end - Instant::now()).min(Duration::from_millis(10)));
         }
         true
@@ -414,6 +512,7 @@ impl Ctx<'_> {
                 latency_ns,
                 attempts,
             } => {
+                self.inbox.claim(&response);
                 o.measured.insert("response".into(), response.to_json());
                 o.measured
                     .insert("latency_ms".into(), Json::from(latency_ns as f64 / 1e6));
@@ -472,13 +571,16 @@ impl Ctx<'_> {
     }
 
     fn expect(&mut self, message: &str, timeout_ms: u64, asserts: &[Assertion]) -> Outcome {
-        let target = match self.session.codec().resolve_rx(message) {
+        let codec = self.session.codec().clone();
+        let target = match codec.resolve_rx(message) {
             Ok(t) => t,
             Err(e) => return Outcome::error(e.to_string()),
         };
-        let rx = self.session.subscribe();
+        let since = self.prev_step_start_ns;
         let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-        loop {
+        self.inbox.drain();
+        let mut found = self.inbox.take(since, |m| codec.matches(m, &target));
+        while found.is_none() {
             if self.abort.load(Ordering::Relaxed) {
                 return Outcome::error("aborted");
             }
@@ -486,19 +588,25 @@ impl Ctx<'_> {
             if left.is_zero() {
                 return Outcome::fail(format!("no `{message}` within {timeout_ms} ms"));
             }
-            match rx.recv_timeout(left.min(Duration::from_millis(20))) {
-                Ok(SessionEvent::Message {
-                    dir: Direction::Rx,
-                    msg,
-                }) if self.session.codec().matches(&msg, &target) => {
-                    let mut o = Outcome::pass();
-                    o.measured.insert("message".into(), msg.to_json());
-                    o.assertions = self.check_message(asserts, &msg);
-                    return o.judge();
+            if let Ok(ev) = self
+                .inbox
+                .rx
+                .recv_timeout(left.min(Duration::from_millis(20)))
+            {
+                if let Some(m) = self.inbox.accept(ev) {
+                    if m.host_ts_ns >= since && codec.matches(&m, &target) {
+                        found = self.inbox.msgs.pop_back();
+                    }
                 }
-                _ => {}
             }
         }
+        let Some(msg) = found else {
+            return Outcome::error("internal: no message");
+        };
+        let mut o = Outcome::pass();
+        o.measured.insert("message".into(), msg.to_json());
+        o.assertions = self.check_message(asserts, &msg);
+        o.judge()
     }
 
     fn capture(
@@ -511,7 +619,17 @@ impl Ctx<'_> {
     ) -> Outcome {
         let store = self.session.telemetry().clone();
         let mark = |name: &str| store.get(name).map(|c| c.total()).unwrap_or(0);
-        let marks: Vec<u64> = channels.iter().map(|c| mark(c)).collect();
+        // Every channel the step names, listed or only asserted on, is
+        // measured over the capture window alone.
+        let mut names: Vec<String> = channels.to_vec();
+        for a in asserts {
+            if let Some(ch) = &a.channel {
+                if !ch.is_empty() && !names.contains(ch) {
+                    names.push(ch.clone());
+                }
+            }
+        }
+        let marks: Vec<u64> = names.iter().map(|c| mark(c)).collect();
         let t0 = Instant::now();
         match (duration_ms, samples) {
             (Some(d), _) => {
@@ -541,7 +659,7 @@ impl Ctx<'_> {
         let elapsed = t0.elapsed().as_secs_f64();
         let mut o = Outcome::pass();
         let mut stats: Vec<(String, Option<StatsSnapshot>)> = Vec::new();
-        for (name, m) in channels.iter().zip(&marks) {
+        for (name, m) in names.iter().zip(&marks) {
             let snap = store.get(name).and_then(|c| {
                 let data = c.data.read();
                 let s = data
@@ -557,12 +675,6 @@ impl Ctx<'_> {
             stats.push((name.clone(), snap));
         }
         for a in asserts {
-            let ch = a.channel.clone().unwrap_or_default();
-            if !channels.contains(&ch) && !ch.is_empty() {
-                // Asserting on a channel that was not listed: capture it too.
-                let snap = store.get(&ch).map(|c| c.stats());
-                stats.push((ch, snap));
-            }
             o.assertions.push(check_stat(a, &stats));
         }
         if stats.iter().all(|(_, s)| s.is_none()) && asserts.is_empty() {

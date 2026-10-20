@@ -54,6 +54,8 @@ pub enum ConnState {
     Connecting,
     /// Link is up.
     Connected,
+    /// A server transport is up but has no client yet (or lost it).
+    Listening,
     /// Waiting to retry after an error.
     Reconnecting {
         /// Attempts so far.
@@ -74,6 +76,7 @@ impl ConnState {
             ConnState::Disconnected => "Disconnected".into(),
             ConnState::Connecting => "Connecting…".into(),
             ConnState::Connected => "Connected".into(),
+            ConnState::Listening => "Waiting for client".into(),
             ConnState::Reconnecting { attempt, error } => {
                 format!("Reconnecting (attempt {attempt}): {error}")
             }
@@ -621,6 +624,25 @@ struct Worker {
     periodic: Vec<Periodic>,
     rate: RateMeter,
     events: Vec<FrameEvent>,
+    /// Set when a write showed the link is gone; the run loop reconnects.
+    link_lost: Option<String>,
+}
+
+/// Why a write failed.
+struct WriteError {
+    message: String,
+    /// The link is gone (as opposed to one write timing out).
+    lost: bool,
+}
+
+impl WriteError {
+    fn from_io(e: &std::io::Error) -> Self {
+        use std::io::ErrorKind::*;
+        WriteError {
+            message: e.to_string(),
+            lost: !matches!(e.kind(), TimedOut | WouldBlock | NotConnected),
+        }
+    }
 }
 
 impl Worker {
@@ -661,6 +683,7 @@ impl Worker {
             periodic: polls,
             rate: RateMeter::default(),
             events: Vec::new(),
+            link_lost: None,
             params,
         }
     }
@@ -678,6 +701,7 @@ impl Worker {
         let mut finished = false;
         let mut buf = vec![0u8; 64 * 1024];
         let mut last_tick_ns = 0u64;
+        let mut had_peer = false;
         loop {
             // Commands.
             loop {
@@ -699,6 +723,9 @@ impl Worker {
                     return;
                 }
                 self.handle_cmd(cmd, &mut transport);
+                if self.link_lost.is_some() {
+                    break;
+                }
             }
 
             // Connection management.
@@ -714,10 +741,15 @@ impl Worker {
                     Ok(t) => {
                         *self.shared.endpoint.lock() = t.describe();
                         self.framer.reset();
+                        had_peer = t.has_peer();
+                        self.shared.set_state(if had_peer {
+                            ConnState::Connected
+                        } else {
+                            ConnState::Listening
+                        });
                         transport = Some(t);
                         attempts = 0;
                         backoff_ms = 100;
-                        self.shared.set_state(ConnState::Connected);
                     }
                     Err(e) => {
                         attempts += 1;
@@ -752,6 +784,22 @@ impl Worker {
                 if t.finished() {
                     finished = true;
                 }
+                let peer = t.has_peer();
+                if peer != had_peer {
+                    had_peer = peer;
+                    *self.shared.endpoint.lock() = t.describe();
+                    // Bytes from one client must not prefix the next one's.
+                    self.framer.reset();
+                    if peer {
+                        self.shared.set_state(ConnState::Connected);
+                    } else {
+                        self.fail_pending("client disconnected");
+                        self.shared.set_state(ConnState::Listening);
+                    }
+                }
+            }
+            if lost.is_none() {
+                lost = self.link_lost.take();
             }
             if finished {
                 transport = None;
@@ -761,6 +809,7 @@ impl Worker {
             }
             if let Some(err) = lost {
                 transport = None;
+                self.link_lost = None;
                 self.fail_pending("disconnected");
                 if self.params.auto_reconnect {
                     self.shared.set_state(ConnState::Reconnecting {
@@ -820,6 +869,12 @@ impl Worker {
     ) {
         match cmd {
             Cmd::Send { id, req, reply } => match transport.as_mut() {
+                Some(t) if !t.has_peer() => self.deliver(Resolved {
+                    id,
+                    name: req.name,
+                    outcome: RequestOutcome::Error("no client connected".into()),
+                    token: reply,
+                }),
                 Some(t) => self.send(id, req, reply, t.as_mut()),
                 None => self.deliver(Resolved {
                     id,
@@ -830,7 +885,7 @@ impl Worker {
             },
             Cmd::SendRaw(bytes) => {
                 if let Some(t) = transport.as_mut() {
-                    self.write(t.as_mut(), &bytes);
+                    let _ = self.write(t.as_mut(), &bytes);
                 }
             }
             Cmd::SetDtr(on) => {
@@ -876,7 +931,20 @@ impl Worker {
         }
     }
 
-    fn write(&self, t: &mut dyn crate::transport::Transport, bytes: &[u8]) -> bool {
+    /// Writes bytes. A write error that means the link is gone sets
+    /// `link_lost`, so the run loop reconnects.
+    fn write(
+        &mut self,
+        t: &mut dyn crate::transport::Transport,
+        bytes: &[u8],
+    ) -> Result<(), WriteError> {
+        if let Some(m) = &self.link_lost {
+            // Do not block again on a link already known to be gone.
+            return Err(WriteError {
+                message: m.clone(),
+                lost: true,
+            });
+        }
         let ts = self.now();
         match t.write_all(bytes) {
             Ok(()) => {
@@ -888,11 +956,15 @@ impl Worker {
                         bytes: Arc::from(bytes),
                     });
                 }
-                true
+                Ok(())
             }
             Err(e) => {
                 tracing::warn!("write failed: {e}");
-                false
+                let w = WriteError::from_io(&e);
+                if w.lost && self.link_lost.is_none() {
+                    self.link_lost = Some(format!("write failed: {}", w.message));
+                }
+                Err(w)
             }
         }
     }
@@ -925,11 +997,11 @@ impl Worker {
         };
         let wire = self.framer.encode(&codec_bytes);
         let ts = self.now();
-        if !self.write(t, &wire) {
+        if let Err(e) = self.write(t, &wire) {
             self.deliver(Resolved {
                 id,
                 name: req.name,
-                outcome: RequestOutcome::Error("write failed".into()),
+                outcome: RequestOutcome::Error(format!("write failed: {}", e.message)),
                 token: reply,
             });
             return;
@@ -1115,7 +1187,7 @@ impl Worker {
         for a in resend {
             let TickAction::Resend { wire, .. } = a;
             LinkCounters::add(&self.shared.counters.retries, 1);
-            if self.write(t, &wire) {
+            if self.write(t, &wire).is_ok() {
                 LinkCounters::add(&self.shared.counters.tx_frames, 1);
             }
         }
@@ -1123,7 +1195,8 @@ impl Worker {
             self.deliver(r);
         }
         let mut due = Vec::new();
-        for p in &mut self.periodic {
+        let peer = t.has_peer();
+        for p in self.periodic.iter_mut().filter(|_| peer) {
             if now >= p.next_ns {
                 p.next_ns = if p.next_ns == 0 { now } else { p.next_ns } + p.period_ns;
                 if p.next_ns < now {

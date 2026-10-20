@@ -69,3 +69,12 @@ Where the build specification left room, these are the choices made, with the re
 42. **The smoke test** renders real frames without a display through `egui::Context::run_ui`, driving the same `AppState` actions the buttons call; `--window` repeats the run in a real window. This covers acceptance criteria 4 and 5 in CI environments without a GPU.
 43. **Badges of composer sends** are keyed `composer: <message>`, so they do not overwrite the badges of configured buttons.
 44. **The project editor** updates `[framing]` keys in place (comments survive) but rewrites the `[[connection.profiles]]` array, writing only non-default keys; comments inside profiles are lost. "Save as button" appends with `toml_edit` and keeps everything else.
+
+## Round 2
+
+45. **`expect` window.** The runner subscribes once for the whole run and buffers received messages (at most 50,000). An `expect` step matches the oldest message of the expected type received since the *previous* step started, so a reply to a fire-and-forget `send` is not missed when it arrives before the `expect` step begins. Each message is consumed once: a reply used by a `send … expect` step, or matched by an earlier `expect`, cannot match again. Messages older than the previous step's start are dropped.
+46. **TCP server state.** A `tcp_server` session is `Listening` ("Waiting for client") until a client connects and again after it leaves. Losing the client fails pending requests with "client disconnected" and resets the framer. Sends without a client fail with "no client connected"; periodic sends pause. The CLI waits for a client as long as it takes.
+47. **Write timeouts.** Writes block at most 1 s. A TCP client whose peer stops reading for that long has lost the link (part of a frame may have been sent, so the stream cannot continue) and reconnects. A TCP server drops that client and keeps listening. A serial write keeps writing partial chunks until the deadline and then fails only that request; the port stays open. Once a write shows the link is gone, queued writes fail at once instead of blocking again.
+48. **Capture window for every named channel.** A `capture` step measures every channel it lists and every channel an assertion names over the capture window only.
+49. **Repeated fields in assertions.** A path that matches several elements (`adc`, `adc[*]`) passes only if every element passes; the report's `measured` is the array.
+50. **Non-finite values** (NaN, ±∞) fail every `eq`, `min` and `max` check, because NaN compares false with any limit and would otherwise pass.

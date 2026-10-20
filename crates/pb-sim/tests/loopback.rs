@@ -398,3 +398,102 @@ fn mcap_export_has_one_channel_per_type() {
     let _ = std::fs::remove_file(path);
     let _ = std::fs::remove_file(out);
 }
+
+fn run_src(s: &Session, p: &Project, src: &str) -> pb_core::sequence::RunReport {
+    let seq = pb_core::sequence::SequenceFile::parse(src, std::path::Path::new("t.toml")).unwrap();
+    let mut ev = |_e: pb_core::sequence::RunEvent| {};
+    pb_core::sequence::run_sequence(s, &p.config, &seq, Default::default(), &mut ev, None)
+}
+
+/// R4: a reply that arrives before its `expect` step starts is not missed.
+#[test]
+fn expect_sees_reply_to_an_earlier_fire_and_forget_send() {
+    let p = demo();
+    let s = start(&p, "sim", None);
+    let r = run_src(
+        &s,
+        &p,
+        r#"
+[[steps]]
+action = "send"
+message = "ping"
+[[steps]]
+action = "wait"
+ms = 100
+[[steps]]
+action = "expect"
+message = "pong"
+timeout_ms = 200
+"#,
+    );
+    assert!(r.passed, "{}", r.summary_text());
+}
+
+/// R4: each message is consumed once: a reply used by `send … expect` is not
+/// matched again by a following `expect`, and two expects need two messages.
+#[test]
+fn expect_consumes_each_message_once() {
+    let p = demo();
+    let s = start(&p, "sim", None);
+    let r = run_src(
+        &s,
+        &p,
+        r#"
+[[steps]]
+action = "send"
+command = "Ping"
+[[steps]]
+action = "expect"
+message = "pong"
+timeout_ms = 200
+"#,
+    );
+    assert!(!r.passed, "the pong belongs to the send step");
+    let r = run_src(
+        &s,
+        &p,
+        r#"
+[[steps]]
+action = "send"
+message = "ping"
+[[steps]]
+action = "expect"
+message = "pong"
+timeout_ms = 300
+[[steps]]
+action = "expect"
+message = "pong"
+timeout_ms = 200
+"#,
+    );
+    use pb_core::sequence::StepStatus::*;
+    let st: Vec<_> = r.steps.iter().map(|s| s.status).collect();
+    // One ping, one pong: the second expect has nothing left to match.
+    assert_eq!(st, vec![Pass, Pass, Fail], "{}", r.summary_text());
+}
+
+/// R8: an assertion on a channel that is not in `channels` measures only the
+/// capture window, not everything since the session started.
+#[test]
+fn capture_assertion_on_unlisted_channel_uses_the_window() {
+    let p = demo();
+    let s = start(&p, "sim", None);
+    let r = run_src(
+        &s,
+        &p,
+        r#"
+[[steps]]
+action = "send"
+command = "Start Stream"
+[[steps]]
+action = "wait"
+ms = 1000
+[[steps]]
+action = "capture"
+channels = ["telemetry.vout_raw"]
+duration_ms = 200
+assert = [ { channel = "telemetry.current_na", stat = "count", min = 100, max = 400 } ]
+"#,
+    );
+    assert!(r.passed, "{}", r.summary_text());
+}

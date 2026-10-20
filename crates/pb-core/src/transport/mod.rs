@@ -25,12 +25,18 @@ use crate::error::CoreError;
 /// How long a `read` may block when no data is available.
 pub const READ_TIMEOUT: Duration = Duration::from_millis(5);
 
+/// How long a `write_all` may block before it fails. A TCP write that times
+/// out loses the link; a serial write that misses it fails only that request.
+pub const WRITE_TIMEOUT: Duration = Duration::from_secs(1);
+
 /// A bidirectional byte link.
 pub trait Transport: Send {
     /// Reads available bytes, blocking at most about [`READ_TIMEOUT`].
     /// `Ok(0)` means nothing arrived; an error means the link is gone.
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize>;
-    /// Writes all bytes.
+    /// Writes all bytes, blocking at most about [`WRITE_TIMEOUT`]. An error of
+    /// kind `TimedOut`, `WouldBlock` or `NotConnected` fails only this write;
+    /// any other error means the link is gone.
     fn write_all(&mut self, data: &[u8]) -> io::Result<()>;
     /// Sets DTR (serial only).
     fn set_dtr(&mut self, _on: bool) -> io::Result<()> {

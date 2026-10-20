@@ -3,7 +3,7 @@
 use std::io::{self, Read, Write};
 use std::time::Duration;
 
-use super::{Transport, READ_TIMEOUT};
+use super::{Transport, READ_TIMEOUT, WRITE_TIMEOUT};
 use crate::config::{ConnectionProfile, FlowControl, Parity};
 use crate::error::CoreError;
 
@@ -18,6 +18,47 @@ pub struct PortInfo {
     pub pid: Option<u16>,
     /// Manufacturer / product strings, when known.
     pub description: Option<String>,
+}
+
+/// Writes all of `data`, retrying partial and timed-out writes until
+/// `limit` has passed. The port's own timeout is the short read timeout, so a
+/// plain `write_all` would fail whenever the device or flow control holds
+/// the line for a few milliseconds. Missing the deadline is `TimedOut`.
+pub(crate) fn write_with_deadline(
+    w: &mut impl Write,
+    data: &[u8],
+    limit: Duration,
+) -> io::Result<()> {
+    let deadline = std::time::Instant::now() + limit;
+    let mut off = 0;
+    while off < data.len() {
+        match w.write(&data[off..]) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "port wrote 0 bytes",
+                ))
+            }
+            Ok(n) => off += n,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::TimedOut
+                        | io::ErrorKind::WouldBlock
+                        | io::ErrorKind::Interrupted
+                ) =>
+            {
+                if std::time::Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!("wrote {off} of {} bytes within {limit:?}", data.len()),
+                    ));
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }
 
 /// Lists serial ports, with USB IDs where the platform provides them.
@@ -166,7 +207,7 @@ impl Transport for SerialTransport {
         }
     }
     fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
-        self.port.write_all(data)?;
+        write_with_deadline(&mut self.port, data, WRITE_TIMEOUT)?;
         self.port.flush()
     }
     fn set_dtr(&mut self, on: bool) -> io::Result<()> {
@@ -192,6 +233,47 @@ pub fn pulse(ms: u64) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Accepts a few bytes per call and times out every other call.
+    struct Slow {
+        got: Vec<u8>,
+        calls: u32,
+        stall: bool,
+    }
+
+    impl Write for Slow {
+        fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+            self.calls += 1;
+            if self.stall || self.calls.is_multiple_of(2) {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "busy"));
+            }
+            let n = b.len().min(3);
+            self.got.extend_from_slice(&b[..n]);
+            Ok(n)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn writes_survive_partial_and_timed_out_chunks() {
+        let mut w = Slow {
+            got: Vec::new(),
+            calls: 0,
+            stall: false,
+        };
+        let data: Vec<u8> = (0..100).collect();
+        write_with_deadline(&mut w, &data, Duration::from_secs(1)).unwrap();
+        assert_eq!(w.got, data);
+        let mut w = Slow {
+            got: Vec::new(),
+            calls: 0,
+            stall: true,
+        };
+        let e = write_with_deadline(&mut w, &data, Duration::from_millis(20)).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::TimedOut);
+    }
 
     #[test]
     fn explicit_port_is_used_verbatim() {

@@ -56,7 +56,15 @@ pub fn connect(p: &Project, profile: Option<&str>, port: Option<String>) -> Resu
     let auto = params.auto_reconnect;
     params.auto_reconnect = false;
     let session = Session::start(params.clone(), connector, SystemClock::shared())?;
-    match session.wait_connected(Duration::from_secs(5)) {
+    let mut state = session.wait_connected(Duration::from_secs(5));
+    if state == ConnState::Listening {
+        // A server profile waits for its client as long as it takes.
+        eprintln!("waiting for a client on {} …", session.endpoint());
+        while state == ConnState::Listening {
+            state = session.wait_connected(Duration::from_secs(60));
+        }
+    }
+    match state {
         ConnState::Connected => {}
         ConnState::Failed(e) => bail!("cannot connect ({}): {e}", prof.endpoint()),
         other => bail!("cannot connect ({}): {}", prof.endpoint(), other.label()),

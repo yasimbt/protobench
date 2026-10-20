@@ -1,0 +1,299 @@
+{
+  "dock": {
+    "focused_surface": null,
+    "surfaces": [
+      {
+        "Main": {
+          "collapsed": false,
+          "collapsed_leaf_count": 0,
+          "focused_node": 12,
+          "nodes": [
+            {
+              "Horizontal": {
+                "collapsed_leaf_count": 0,
+                "fraction": 0.2199999988079071,
+                "fully_collapsed": false,
+                "rect": {
+                  "max": {
+                    "x": 0.0,
+                    "y": 0.0
+                  },
+                  "min": {
+                    "x": 0.0,
+                    "y": 0.0
+                  }
+                }
+              }
+            },
+            {
+              "Leaf": {
+                "active": 0,
+                "collapsed": false,
+                "rect": {
+                  "max": {
+                    "x": 0.0,
+                    "y": 0.0
+                  },
+                  "min": {
+                    "x": 0.0,
+                    "y": 0.0
+                  }
+                },
+                "scroll": 0.0,
+                "tab_bar_hidden": false,
+                "tabs": [
+                  {
+                    "id": 2,
+                    "panel": {
+                      "type": "command_bar"
+                    },
+                    "title": "Commands"
+                  },
+                  {
+                    "id": 3,
+                    "panel": {
+                      "type": "channels"
+                    },
+                    "title": "Channels"
+                  }
+                ],
+                "viewport": {
+                  "max": {
+                    "x": 0.0,
+                    "y": 0.0
+                  },
+                  "min": {
+                    "x": 0.0,
+                    "y": 0.0
+                  }
+                }
+              }
+            },
+            {
+              "Horizontal": {
+                "collapsed_leaf_count": 0,
+                "fraction": 0.7200000286102295,
+                "fully_collapsed": false,
+                "rect": {
+                  "max": {
+                    "x": 0.0,
+                    "y": 0.0
+                  },
+                  "min": {
+                    "x": 0.0,
+                    "y": 0.0
+                  }
+                }
+              }
+            },
+            "Empty",
+            "Empty",
+            {
+              "Vertical": {
+                "collapsed_leaf_count": 0,
+                "fraction": 0.6600000262260437,
+                "fully_collapsed": false,
+                "rect": {
+                  "max": {
+                    "x": 0.0,
+                    "y": 0.0
+                  },
+                  "min": {
+                    "x": 0.0,
+                    "y": 0.0
+                  }
+                }
+              }
+            },
+            {
+              "Leaf": {
+                "active": 0,
+                "collapsed": false,
+                "rect": {
+                  "max": {
+                    "x": 0.0,
+                    "y": 0.0
+                  },
+                  "min": {
+                    "x": 0.0,
+                    "y": 0.0
+                  }
+                },
+                "scroll": 0.0,
+                "tab_bar_hidden": false,
+                "tabs": [
+                  {
+                    "id": 4,
+                    "panel": {
+                      "channels": [
+                        "telemetry.vout_raw",
+                        "telemetry.current_na",
+                        "telemetry.temperature_c",
+                        "status.battery_mv",
+                        "status.uptime_s",
+                        "status.fault_flags"
+                      ],
+                      "type": "readouts"
+                    },
+                    "title": "Readouts"
+                  },
+                  {
+                    "id": 5,
+                    "panel": {
+                      "channels": [
+                        "telemetry.state"
+                      ],
+                      "type": "indicators"
+                    },
+                    "title": "Indicators"
+                  }
+                ],
+                "viewport": {
+                  "max": {
+                    "x": 0.0,
+                    "y": 0.0
+                  },
+                  "min": {
+                    "x": 0.0,
+                    "y": 0.0
+                  }
+                }
+              }
+            },
+            "Empty",
+            "Empty",
+            "Empty",
+            "Empty",
+            {
+              "Leaf": {
+                "active": 0,
+                "collapsed": false,
+                "rect": {
+                  "max": {
+                    "x": 0.0,
+                    "y": 0.0
+                  },
+                  "min": {
+                    "x": 0.0,
+                    "y": 0.0
+                  }
+                },
+                "scroll": 0.0,
+                "tab_bar_hidden": false,
+                "tabs": [
+                  {
+                    "id": 1,
+                    "panel": {
+                      "autoscale": true,
+                      "show_picker": true,
+                      "traces": [
+                        {
+                          "axis": 1,
+                          "channel": "telemetry.vout_raw",
+                          "color": [
+                            31,
+                            119,
+                            180
+                          ],
+                          "visible": true
+                        },
+                        {
+                          "axis": 2,
+                          "channel": "telemetry.current_na",
+                          "color": [
+                            255,
+                            127,
+                            14
+                          ],
+                          "visible": true
+                        }
+                      ],
+                      "type": "time_plot",
+                      "window_s": 10.0
+                    },
+                    "title": "Time Plot"
+                  }
+                ],
+                "viewport": {
+                  "max": {
+                    "x": 0.0,
+                    "y": 0.0
+                  },
+                  "min": {
+                    "x": 0.0,
+                    "y": 0.0
+                  }
+                }
+              }
+            },
+            {
+              "Leaf": {
+                "active": 0,
+                "collapsed": false,
+                "rect": {
+                  "max": {
+                    "x": 0.0,
+                    "y": 0.0
+                  },
+                  "min": {
+                    "x": 0.0,
+                    "y": 0.0
+                  }
+                },
+                "scroll": 0.0,
+                "tab_bar_hidden": false,
+                "tabs": [
+                  {
+                    "id": 6,
+                    "panel": {
+                      "autoscroll": true,
+                      "filter": "",
+                      "type": "text_console"
+                    },
+                    "title": "Text Console"
+                  },
+                  {
+                    "id": 7,
+                    "panel": {
+                      "type": "channel_stats"
+                    },
+                    "title": "Channel Statistics"
+                  },
+                  {
+                    "id": 8,
+                    "panel": {
+                      "filter": "",
+                      "mode": "log",
+                      "type": "table"
+                    },
+                    "title": "Table"
+                  },
+                  {
+                    "id": 9,
+                    "panel": {
+                      "type": "link_stats"
+                    },
+                    "title": "Link Statistics"
+                  }
+                ],
+                "viewport": {
+                  "max": {
+                    "x": 0.0,
+                    "y": 0.0
+                  },
+                  "min": {
+                    "x": 0.0,
+                    "y": 0.0
+                  }
+                }
+              }
+            },
+            "Empty",
+            "Empty"
+          ]
+        }
+      }
+    ]
+  },
+  "version": 1
+}

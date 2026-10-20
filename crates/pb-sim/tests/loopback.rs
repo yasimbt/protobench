@@ -289,3 +289,22 @@ text = "fw=${fw} rate=${rate}"
     assert!(r.passed, "{}", r.summary_text());
     assert_eq!(r.log, vec!["fw= rate=500".to_string()]);
 }
+
+#[test]
+fn stored_samples_are_time_ordered_and_smooth() {
+    let p = demo();
+    let s = start(&p, "sim", None);
+    assert!(send(&s, &p, "Start Stream").is_ok());
+    std::thread::sleep(Duration::from_millis(500));
+    let ch = s.telemetry().get("telemetry.vout_raw").unwrap();
+    let d = ch.data.read();
+    let pts: Vec<(f64, f64)> = d.ring.iter().collect();
+    assert!(pts.len() > 300);
+    for w in pts.windows(2) {
+        assert!(w[1].0 >= w[0].0, "time went backwards: {:?}", w);
+        let dt = w[1].0 - w[0].0;
+        assert!((dt - 0.001).abs() < 1e-6, "uneven spacing {dt}");
+        // 2 Hz sine of 75 mV amplitude changes < 1 mV per ms.
+        assert!((w[1].1 - w[0].1).abs() < 1.0, "jump {:?}", w);
+    }
+}

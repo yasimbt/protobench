@@ -266,9 +266,9 @@ The step fails on a timeout, on a reply of the wrong type, or on a failed assert
 
 **`wait`** — `ms`: pause.
 
-**`expect`** — wait for a received message. `message` (required), `timeout_ms` (default 1000), `assert`.
+**`expect`** — wait for a received message. `message` (required), `timeout_ms` (default 1000), `assert`. It matches the oldest message of that type received since the *previous* step started that no earlier step has used.
 
-**`capture`** — collect samples, then check statistics. `channels` (required), and `duration_ms` or `samples` (new samples on the first channel; `timeout_ms`, default 10000, bounds the wait). `assert` entries use `channel` and `stat`. `rate_hz` is the sample count divided by the capture duration.
+**`capture`** — collect samples, then check statistics. `channels` (required), and `duration_ms` or `samples` (new samples on the first channel; `timeout_ms`, default 10000, bounds the wait). `assert` entries use `channel` and `stat`. Every channel listed or named in an assertion is measured over the capture window only. `rate_hz` is the sample count divided by the capture duration.
 
 **`set`** — `var` + `value`, or a `vars` table.
 
@@ -278,11 +278,21 @@ The step fails on a timeout, on a reply of the wrong type, or on a failed assert
 
 **`prompt_operator`** — `message`. The GUI shows a dialog (OK / Fail). Headless runs follow `non_interactive`.
 
+**`script`** — run a Rhai script (API in the user guide, *Scripts*).
+
+| Key | Default | Meaning |
+|---|---|---|
+| `code` | — | Inline script, usually a `"""` multi-line string, or |
+| `file` | — | a script file, relative to the sequence file (read when the sequence loads). |
+| `timeout_ms` | `60000` | Wall-clock limit for the whole script, including `sleep`. |
+
+Exactly one of `code` and `file` is required. A script that throws or calls `fail()` fails the step, a false `check()` adds a failed assertion, and any other stop (syntax or type error, the 50-million-operation limit, the time limit, abort) is an error. Variables set with `set_var` are available to later steps as `${name}`.
+
 ### Assertions
 
 | Key | Meaning |
 |---|---|
-| `path` | Field path in the reply or expected message. |
+| `path` | Field path in the reply or expected message. A repeated field or `[*]` path checks every element. |
 | `channel` | Channel name. |
 | `stat` | For capture: `mean` (default), `min`, `max`, `std`, `rate_hz`, `count`, `last`. |
 | `eq` | Must equal. Numbers compare as floats; enums match by name or number. |
@@ -290,7 +300,7 @@ The step fails on a timeout, on a reply of the wrong type, or on a failed assert
 | `min`, `max` | Inclusive bounds. |
 | `within` | With `eq`: allowed absolute difference. |
 
-At least one of `eq`, `ne`, `min`, `max` is required.
+At least one of `eq`, `ne`, `min`, `max` is required. A measured value that is not a finite number (NaN, ±∞) fails any `eq`, `min` or `max`.
 
 ### Reports
 
@@ -339,4 +349,8 @@ Node rectangles in the file are recomputed on the next frame; their values do no
 
 ## GUI settings
 
-Theme, ring-buffer capacity (default 1,000,000 points per channel), plot frame-rate cap (default 60 fps), recordings folder (default `<project>/recordings`) and the recent-projects list are stored in eframe's per-user storage, not in the project.
+Theme, ring-buffer capacity (default 1,000,000 points per channel), plot frame-rate cap (default 60 fps), recordings folder (default `<project>/recordings`), Foxglove server bind address and port (default `127.0.0.1`, `8765`) and the recent-projects list are stored in eframe's per-user storage, not in the project.
+
+## Checking a project
+
+`protobench check --project <dir>` validates everything above without connecting. Errors: invalid `project.toml` keys or values, schema problems, names and paths that do not resolve, unknown channels or statistics in sequences, assertions without a condition, scripts that do not compile. Warnings: unknown keys in `project.toml`, `${vars}` nothing defines, channels in `layout.json` that no telemetry entry produces. Exit code 1 if there is an error.

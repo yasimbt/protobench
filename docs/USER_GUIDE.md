@@ -46,6 +46,10 @@ Opening happens on the connection's I/O thread; the window stays responsive. Wit
 
 `port = "auto"` picks the first serial port whose USB vendor/product IDs match `usb_vid`/`usb_pid`.
 
+A `tcp_server` profile shows **Waiting for client** until a client connects, and again after it leaves. Commands sent meanwhile fail with "no client connected" and periodic sends pause; requests still waiting when the client leaves fail with "client disconnected". A new client starts with a clean framer, so a half frame from the previous one cannot corrupt its first message.
+
+Writes give up after 1 s. A TCP peer that stops reading for that long counts as a lost link (and reconnects with `auto_reconnect`); a serial port that cannot take the data in time (flow control held, device stalled) fails only that command.
+
 ## Main window
 
 - **Menu bar**: File, Connection, Record, View, Tools, Help.
@@ -161,13 +165,17 @@ A form for connection profiles (add, remove, edit fields for the selected transp
 
 Lists `mode = "triggered"` telemetry entries. Arming one captures its next `samples` messages. Entries with a `trigger` expression also arm themselves when the expression becomes true.
 
+### Foxglove server (Tools menu)
+
+**Tools ▸ Foxglove server** serves the live session to [Foxglove](https://foxglove.dev) over its WebSocket protocol. In Foxglove choose *Open connection ▸ Foxglove WebSocket* and enter the address shown in the menu and the status bar (default `ws://127.0.0.1:8765`). Every message type is a topic, named as in the MCAP export (`/rx/telemetry`, `/tx/set_bias`, `/text`, `/markers`), with the project's schema attached, so Foxglove's plots, raw-message and log panels work without further setup. Once switched on, the server follows the connection: it starts with each session and stops on disconnect. The port and bind address are in **Settings**; bind `0.0.0.0` to let other machines connect. A viewer that cannot keep up loses messages instead of slowing the session.
+
 ### Prompt and confirmation dialogs
 
 The **prompt dialog** lists the command's `prompt` fields pre-filled from its payload. Values are read as TOML values (`300`, `true`, `"text"`, `[1, 2]`); anything else is sent as a string. **Send** (or Enter) sends, **Cancel** discards. The **confirmation dialog** appears for `dangerous` commands; only the red **Send** button sends.
 
 ### Settings (File menu)
 
-Theme; ring-buffer size per channel (default 1,000,000 points; applies on the next connect); plot frame-rate cap (default 60 fps); recordings folder (default `<project>/recordings`).
+Theme; ring-buffer size per channel (default 1,000,000 points; applies on the next connect); plot frame-rate cap (default 60 fps); recordings folder (default `<project>/recordings`); Foxglove server address and port (default `127.0.0.1:8765`; applies when the server next starts).
 
 ## Recording and export
 
@@ -175,6 +183,7 @@ Theme; ring-buffer size per channel (default 1,000,000 points; applies on the ne
 
 - **Record ▸ Export CSV (joined)…**: one file with `time_s` and one column per channel. Rows are the union of all timestamps; each cell holds the channel's latest value at or before that time (empty before its first sample).
 - **Record ▸ Export CSV (one file per channel)…**: `<name>_<channel>.csv` files with `time_s,value`.
+- **Record ▸ Export Parquet…**: the joined CSV's rows and columns in one Parquet file (`time_s` plus a nullable `float64` column per channel, Snappy compressed), for pandas, polars or DuckDB.
 - **Record ▸ Export recording to MCAP…**: pick a `.pbsession`, then an output file. Each message type gets its own channel (`/rx/telemetry`, `/tx/set_bias`, …) with `protobuf` schema and message encoding, so Foxglove Studio and PlotJuggler can open it. Text lines go to `/text` and markers to `/markers` as JSON.
 - The time plot's right-click menu exports just the visible range.
 
@@ -182,7 +191,7 @@ Theme; ring-buffer size per channel (default 1,000,000 points; applies on the ne
 
 ## Sequences
 
-A sequence file is a list of steps: `send`, `wait`, `expect`, `capture`, `set`, `loop`, `log` and `prompt_operator`, with `${var}` substitution and assertions on replies and channel statistics. See `CONFIG_REFERENCE.md` for every key. The demo's `sequences/smoke.toml`:
+A sequence file is a list of steps: `send`, `wait`, `expect`, `capture`, `set`, `loop`, `log`, `prompt_operator` and `script`, with `${var}` substitution and assertions on replies and channel statistics. See `CONFIG_REFERENCE.md` for every key. The demo's `sequences/smoke.toml`:
 
 1. sends `Ping` and expects `pong`;
 2. sends `set_bias` with `millivolts = ${bias_mv}` and asserts `ack.ok == true`;
@@ -192,6 +201,41 @@ A sequence file is a list of steps: `send`, `wait`, `expect`, `capture`, `set`, 
 
 By default a failed step skips the remaining steps (`continue_on_failure = true` keeps going). Each executed step is one JUnit test case.
 
+**`expect` timing.** An `expect` step matches messages received since the *previous* step started, so a reply that arrives while a fire-and-forget `send` or a `wait` is still running is not missed. Each message is used once: a reply already taken by a `send … expect` step, or by an earlier `expect`, does not match again.
+
+**Repeated fields.** An assertion on a repeated field (`adc`) or a `[*]` path checks every element; the report lists all measured values.
+
+Run `protobench check --project <dir>` before a test campaign: it reports unknown commands, message names, field paths, channels and statistics in every sequence, with the file and line.
+
+### Scripts
+
+A `script` step runs a [Rhai](https://rhai.rs) script, for logic a fixed list of steps cannot express: sweeps, conditional retries, computed limits. Write it inline with `code = """ … """` or in a file next to the sequence with `file = "sweep.rhai"`. The demo's `sequences/scripted.toml` sweeps the bias and checks each acknowledgement, then judges one second of current readings:
+
+```rhai
+let sweep = get_var("sweep");
+for mv in sweep {
+    let r = send("Set Bias", #{ millivolts: mv });
+    check(r.status == "ok" && r.response.ack.ok, `bias ${mv} mV acknowledged`);
+}
+set_var("last_bias", sweep[sweep.len() - 1]);
+```
+
+| Function | Does |
+|---|---|
+| `get_var(name)`, `set_var(name, value)` | read and write sequence variables (`${name}` in later steps) |
+| `send(command)`, `send(command, #{field: value})` | send a project command, optionally overriding payload fields |
+| `send_msg(message, #{...})`, `send_msg(message, #{...}, expect)` | send any message, optionally waiting for a reply |
+| `last(channel)` | newest value of a channel, or `()` before the first sample |
+| `stats(channel)`, `stats(channel, ms)` | `#{count, mean, min, max, std, rate_hz, last}` over all samples or the last `ms` |
+| `log(text)`, `print(text)` | a line in the run log and report |
+| `check(cond, message)` | an assertion in the report; a false one fails the step, the script continues |
+| `fail(message)` | stop now and fail the step |
+| `sleep(ms)` | wait (stops on abort or at the time limit) |
+
+`send` and `send_msg` return `#{status, response, latency_ms, attempts, error}`, with `status` `"ok"`, `"sent"`, `"timeout"` or `"error"`; they never stop the script, so the script decides what a timeout means. `response` is the reply as Protobuf JSON, so fields read naturally (`r.response.ack.ok`). The script's last value, if any, is stored in the step's `measured.result`.
+
+Scripts are sandboxed: no file, network or module access, at most 50 million operations, and a wall-clock limit (`timeout_ms`, default 60 s). A script that throws or calls `fail` fails the step; one that stops for another reason (a syntax or type error, a limit, abort) is reported as an error.
+
 ## Command line
 
 ```
@@ -199,17 +243,21 @@ protobench list-ports [--json]
 protobench schema   --project <dir> [--message <type>]
 protobench send     --project <dir> [--profile <name>] [--port <p>] --command <name> [--set field=value ...] [--wait]
 protobench monitor  --project <dir> [--profile <name>] [--port <p>] [--json] [--channels a,b] [--send <cmd>] [--duration <s>] [--record <file>]
+                    [--foxglove <port>] [--foxglove-bind <addr>]
 protobench run      --project <dir> --sequence <name> [--profile <name>] [--port <p>] [--report-dir <d>] [--non-interactive fail|continue]
-protobench decode   <file.pbsession> [--json] [--csv out.csv] [--mcap out.mcap]
+protobench check    --project <dir> [--json]
+protobench decode   <file.pbsession> [--json] [--csv out.csv] [--parquet out.parquet] [--mcap out.mcap]
+                    [--channels a,b] [--range <t0>:<t1>] [--per-channel]
 protobench sim      --project <dir> [--tcp <port>] [--bind <addr>]
 ```
 
 - `list-ports` prints ports with USB VID:PID and product names.
 - `schema` prints messages, fields with numbers, types and comments, and enums.
 - `send` sends one command. `--set millivolts=300` overrides payload fields (values in TOML syntax). Without `--wait` it is fire-and-forget; with it, the reply is printed as JSON and the exit code is 1 on timeout or error.
-- `monitor` prints decoded messages and text lines (`--json`: one object per line), or with `--channels` the latest channel values whenever they change. `--send` sends commands after connecting; `--duration` stops after N seconds; `--record` writes a session file.
+- `monitor` prints decoded messages and text lines (`--json`: one object per line), or with `--channels` the latest channel values whenever they change. `--send` sends commands after connecting; `--duration` stops after N seconds; `--record` writes a session file. `--foxglove 8765` also serves the session to Foxglove (see *Foxglove server*), on `127.0.0.1` unless `--foxglove-bind 0.0.0.0`. With a `tcp_server` profile, `monitor`, `send` and `run` wait for the client to connect.
 - `run` runs a sequence headlessly and writes `<sequence>_<timestamp>.json` and `.xml` to `--report-dir` (default `<project>/reports`). Exit codes: **0** all steps passed, **1** a step failed, **2** configuration or connection error. `--non-interactive` decides what `prompt_operator` does (default: the sequence's `non_interactive`, else `fail`). `--port` overrides the profile's port, so the same sequence runs on any test station: `protobench run --project . --sequence smoke --profile usb --port COM5`.
-- `decode` prints a recording (`--json`: one object per record), or exports its channels to CSV or its messages to MCAP.
+- `check` checks a project without connecting: `project.toml`, the schema, every sequence (commands, messages, assertion and `save` paths, channels, statistics, scripts that do not compile, `${vars}` nothing defines) and the channels in `layout.json`. Findings print as `file:line: error|warning: message`; the exit code is **1** if there is any error, **0** otherwise, so it fits a CI step.
+- `decode` prints a recording (`--json`: one object per record), or exports its channels to CSV or Parquet and its messages to MCAP. `--channels` limits the export to some channels, `--range 12.5:20` to a time window in seconds (either side may be empty), and `--per-channel` writes one CSV per channel.
 - `sim` runs the project's simulator as a TCP server (default port 9000). Point a `tcp_client` profile at it to test the real network path.
 
 `--log debug` (or `info`, `pb_core=trace`, …) prints diagnostics to stderr.
@@ -224,10 +272,14 @@ This lets you build dashboards and sequences before hardware exists, and test ho
 
 | Symptom | Likely cause |
 |---|---|
+| Anything odd after editing the project | Run `protobench check --project <dir>` first; it points at the file and line. |
 | CRC errors on every frame | CRC type, initial value or byte order differs from the firmware (`crc`, `crc_endian`). Compare check values in `FIRMWARE_INTEGRATION.md`. |
 | Framing errors, no CRC errors | Framing type, length width/byte order or sync word differs; or a baud-rate mismatch (look at the Raw Console). |
 | Decode errors with good CRCs | Schema or dispatch mode does not match the firmware (`tx_root`/`rx_root`, `[codec.ids]`). The Link Statistics bad-frame list shows the bytes. |
 | Unknown message IDs | An ID is missing from `[codec.ids]`. |
 | Commands time out but telemetry works | The firmware does not echo the sequence ID into `response_field`, or replies with another type than `expect`. |
 | No text lines | `text_passthrough` is off, lines do not end with `\n`, or the framing is a length prefix without a sync word. |
+| Text lines appear a few milliseconds late | Expected with COBS/SLIP: a line is held until the next frame or 5 ms of silence, because its bytes could also be the start of a frame. |
+| A `tcp_server` profile stays at "Waiting for client" | Nothing has connected to the port yet; check the device's target address and the firewall. |
+| Foxglove connects but shows no data | Pick a topic in a panel (Foxglove subscribes per panel), and start the stream. From another machine, bind `0.0.0.0`. |
 | GUI does not start on Linux | The OpenGL, Wayland or X11 libraries are not on the library path (see README). |

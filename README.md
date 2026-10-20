@@ -7,22 +7,25 @@ ProtoBench is a desktop and command-line tool for developing and testing embedde
 - COBS, SLIP, varint or fixed length prefix (optional sync word), CRC-8/16/32, envelope (`oneof`), message-ID prefix or fixed dispatch, firmware `printf` lines on the same UART.
 - Dockable dashboards saved per project: time plots with two Y axes, cursors and min/max decimation for millions of points; XY plots; readouts with limit colours; enum/bool indicators; message tables and inspector with byte highlighting; raw and text consoles; channel and link statistics; histogram/FFT.
 - Request/response correlation with timeouts and retries, periodic sends, derived channels, field metadata (units, scale, limits).
-- Session recordings that decode on their own, CSV and MCAP export (Foxglove, PlotJuggler).
-- Test sequences in TOML with JSON and JUnit reports.
+- Session recordings that decode on their own; CSV, Parquet and MCAP export (pandas/polars, Foxglove, PlotJuggler).
+- A live Foxglove WebSocket server, so Foxglove's panels show the device while you work.
+- Test sequences in TOML with JSON and JUnit reports, sandboxed Rhai scripts for sweeps and custom logic, and `protobench check` to catch broken projects in CI.
 
 <!-- Screenshot: docs/images/dashboard.png (main window with the demo project connected to the simulator) -->
 
 ## Build
 
-Rust stable (1.95 or newer):
+Rust stable (1.95 or newer) and a C linker:
 
 ```sh
 cargo build --workspace --release
 ```
 
+Parquet export is a default cargo feature of `pb-core` (`parquet`); build with `--no-default-features` on `pb-core` to leave it out and save compile time.
+
 This produces `target/release/protobench` (CLI) and `target/release/protobench-gui` (GUI).
 
-On Linux the GUI loads OpenGL, Wayland/X11 and xkbcommon at runtime; distributions ship these with any desktop. On NixOS, run it with those libraries on `LD_LIBRARY_PATH`, for example from a shell with `libGL`, `wayland`, `libxkbcommon` and `libX11`. Serial ports are enumerated without libudev; USB IDs come from sysfs.
+On Linux the GUI loads OpenGL, Wayland/X11 and xkbcommon at runtime; distributions ship these with any desktop. On NixOS, build inside a shell with a C compiler (e.g. `nix shell nixpkgs#gcc`) and run the GUI with those libraries on `LD_LIBRARY_PATH`, for example from a shell with `libGL`, `wayland`, `libxkbcommon` and `libX11`. Serial ports are enumerated without libudev; USB IDs come from sysfs.
 
 ## Quick start with the simulator
 
@@ -47,6 +50,18 @@ target/release/protobench monitor --project examples/demo-sensor --profile sim \
     --send "Start Stream" --duration 2 --record demo.pbsession
 target/release/protobench decode demo.pbsession --csv demo.csv
 
+# Check the project (exit 1 on errors), run the scripted bias sweep
+target/release/protobench check --project examples/demo-sensor
+target/release/protobench run --project examples/demo-sensor --sequence scripted --profile sim
+
+# Export part of a recording to Parquet
+target/release/protobench decode demo.pbsession --parquet demo.parquet \
+    --channels telemetry.vout_raw,telemetry.current_na --range 0.5:1.5
+
+# Watch the simulator live in Foxglove (Open connection > Foxglove WebSocket > ws://127.0.0.1:8765)
+target/release/protobench monitor --project examples/demo-sensor --profile sim \
+    --send "Start Stream" --foxglove 8765
+
 # Serve the simulator over TCP and talk to it through the "net" profile
 target/release/protobench sim --project examples/demo-sensor --tcp 9000 &
 target/release/protobench send --project examples/demo-sensor --profile net \
@@ -68,7 +83,8 @@ Copy `examples/demo-sensor/` (or use **File ▸ New project…**), point `[schem
 
 ```
 crates/pb-core   all logic (config, schema, framing, codec, transports, session,
-                 telemetry, commands, recorder, sequences); no UI dependencies
+                 telemetry, commands, recorder, sequences and scripts, project
+                 checks, Foxglove server); no UI dependencies
 crates/pb-sim    device simulator (library; used by the CLI, GUI and tests)
 crates/pb-cli    `protobench` command-line tool
 crates/pb-gui    `protobench-gui` desktop app (eframe/egui)
@@ -81,7 +97,7 @@ docs             documentation
 
 ```sh
 cargo test --workspace
-cargo clippy --workspace -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 # 5 kHz for 10 s through the simulator loopback (ignored by default)
 cargo test --release -p pb-sim --test loopback performance -- --ignored --nocapture
 # GUI: drives the command buttons and composer against the simulator while rendering frames

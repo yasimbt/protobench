@@ -44,6 +44,9 @@ enum Step {
     WaitErase,
     Composer,
     WaitComposer,
+    Foxglove,
+    Parquet,
+    WaitParquet,
     Render,
     Done,
 }
@@ -191,6 +194,48 @@ impl Script {
                         self.composer_targets.len(),
                         self.composer_targets.join(", ")
                     ));
+                    self.step = Step::Foxglove;
+                }
+            }
+            Step::Foxglove => {
+                // Tools > Foxglove server, on a free port.
+                s.settings.foxglove_port = 0;
+                if let Err(e) = s.set_foxglove(true) {
+                    return self.fail(format!("Foxglove server: {e}"));
+                }
+                let Some((addr, _)) = s.foxglove_status() else {
+                    return self.fail("Foxglove server not running");
+                };
+                if std::net::TcpStream::connect(addr).is_err() {
+                    return self.fail(format!("Foxglove server at {addr} refuses connections"));
+                }
+                self.log
+                    .push(format!("Foxglove server listening on ws://{addr}"));
+                self.step = Step::Parquet;
+            }
+            Step::Parquet => {
+                // Record > Export Parquet.
+                s.export_parquet(smoke_parquet_path());
+                self.step = Step::WaitParquet;
+            }
+            Step::WaitParquet => {
+                let note = s
+                    .notifications
+                    .iter()
+                    .rev()
+                    .map(|(_, n)| n.clone())
+                    .find(|n| n.contains("smoke.parquet"));
+                if let Some(n) = note {
+                    let path = smoke_parquet_path();
+                    let ok = std::fs::read(&path)
+                        .map(|b| b.starts_with(b"PAR1") && b.ends_with(b"PAR1"))
+                        .unwrap_or(false);
+                    let _ = std::fs::remove_file(&path);
+                    if !ok {
+                        return self.fail(format!("Parquet export: {n}"));
+                    }
+                    self.log.push(format!("Parquet export: {n}"));
+                    s.set_foxglove(false).ok();
                     self.step = Step::Render;
                 }
             }
@@ -214,6 +259,13 @@ impl Script {
             Step::Done => {}
         }
     }
+}
+
+fn smoke_parquet_path() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "protobench-smoke-{}.smoke.parquet",
+        std::process::id()
+    ))
 }
 
 fn verify(app: &ProtoBenchApp) -> Result<String, String> {

@@ -361,6 +361,10 @@ impl SeqCheck<'_> {
         let mut defined: BTreeSet<String> = seq.vars.keys().cloned().collect();
         collect_defined(&seq.steps, &mut defined);
         let mut seen = BTreeSet::new();
+        // `${…}` inside script code is Rhai string interpolation, not a
+        // sequence variable.
+        let masked = mask_script_code(src);
+        let src = masked.as_str();
         let mut rest = src;
         let mut offset = 0;
         while let Some(start) = rest.find("${") {
@@ -394,6 +398,47 @@ fn collect_defined(steps: &[Step], out: &mut BTreeSet<String>) {
             _ => {}
         }
     }
+}
+
+/// `src` with the `code` values of script steps blanked out (newlines kept,
+/// so line numbers stay right).
+fn mask_script_code(src: &str) -> String {
+    let Ok(doc) = src.parse::<toml_edit::Document<String>>() else {
+        return src.to_string();
+    };
+    let mut spans = Vec::new();
+    fn collect(t: &dyn toml_edit::TableLike, spans: &mut Vec<std::ops::Range<usize>>) {
+        let is_script = t
+            .get("action")
+            .and_then(|a| a.as_str())
+            .is_some_and(|a| a == "script");
+        if is_script {
+            if let Some(span) = t.get("code").and_then(|c| c.span()) {
+                spans.push(span);
+            }
+        }
+        if let Some(arr) = t.get("steps").and_then(|x| x.as_array()) {
+            for v in arr.iter() {
+                if let Some(it) = v.as_inline_table() {
+                    collect(it, spans);
+                }
+            }
+        }
+    }
+    if let Some(aot) = doc.get("steps").and_then(|s| s.as_array_of_tables()) {
+        for t in aot.iter() {
+            collect(t, &mut spans);
+        }
+    }
+    let mut bytes = src.as_bytes().to_vec();
+    for r in spans {
+        for b in bytes.get_mut(r).into_iter().flatten() {
+            if *b != b'\n' {
+                *b = b' ';
+            }
+        }
+    }
+    String::from_utf8(bytes).unwrap_or_else(|_| src.to_string())
 }
 
 /// Names a script sets with `set_var("name", …)`.
@@ -528,7 +573,22 @@ mod tests {
     fn demo_project_is_clean() {
         let p = demo();
         let d = check_project(&p);
-        assert!(d.iter().all(|d| !d.is_error()), "{d:#?}");
+        assert!(d.is_empty(), "{d:#?}");
+    }
+
+    #[test]
+    fn rhai_interpolation_is_not_a_sequence_variable() {
+        let p = demo();
+        let src = "[[steps]]\naction = \"script\"\ncode = \"\"\"\nlet mv = 5;\nlog(`at ${mv} mV`);\n\"\"\"\n\n[[steps]]\naction = \"log\"\ntext = \"${nope}\"\n\n[[steps]]\naction = \"loop\"\ncount = 1\nsteps = [ { action = \"script\", code = \"log(`${x}`)\" } ]\n";
+        let d = check_sequence_str(src, Path::new("s.toml"), &p.config, None);
+        let text: Vec<String> = d.iter().map(|d| d.to_string()).collect();
+        assert_eq!(
+            text,
+            vec![
+                "s.toml:10: warning: variable `nope` is never defined ([vars], set or save)"
+                    .to_string()
+            ]
+        );
     }
 
     #[test]

@@ -55,7 +55,7 @@ Every transport read is one frame: one UDP datagram, for example. The CRC, if co
 
 With `text_passthrough = true`, firmware can print log lines on the same UART as the frames. A line is the bytes before a `\n` that start with a printable character (0x21–0x7E) and contain only printable ASCII, tab or CR. It goes to the text console instead of the framer. Rules:
 
-- **COBS and SLIP**: lines may appear between frames. End each line with `\n` before the next frame starts. A frame is always terminated by its delimiter, so a line that follows a frame starts clean.
+- **COBS and SLIP**: lines may appear between frames. End each line with `\n` before the next frame starts. A frame is always terminated by its delimiter, so a line that follows a frame starts clean. The bytes of a line are also a valid start of a frame (a COBS code byte is often printable, and protobuf's most common first byte, `0x0A`, is `\n`), so ProtoBench decides afterwards: when the next delimiter arrives, the whole buffer is first tried as one frame, and a frame that passes the CRC wins. Otherwise the lines go to the text console and the rest is decoded as the frame. If no frame follows, the lines appear after 5 ms of silence. **Use a CRC when text and frames share a link**; without one this decision is a heuristic.
 - **Length prefix with a sync word**: lines may appear between frames; bytes outside frames that are not a complete printable line count as framing errors.
 - **Length prefix without a sync word, and `none`**: text passthrough is not supported.
 

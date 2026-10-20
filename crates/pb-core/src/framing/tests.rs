@@ -277,3 +277,60 @@ fn unframed_each_push_is_a_frame() {
         }
     ));
 }
+
+#[test]
+fn documented_hex_examples() {
+    // docs/FIRMWARE_INTEGRATION.md, "Worked examples".
+    let cobs = build_framer(&FramingConfig {
+        kind: FramingType::Cobs,
+        crc: CrcKind::Crc16CcittFalse,
+        ..Default::default()
+    });
+    let hex = |b: &[u8]| crate::util::hex(b);
+    assert_eq!(
+        hex(&cobs.encode(&[0x08, 0x01, 0x12, 0x00])),
+        "04 08 01 12 03 22 53 00"
+    );
+    assert_eq!(
+        hex(&cobs.encode(&[0x08, 0x02, 0x1A, 0x03, 0x08, 0xC8, 0x01])),
+        "0A 08 02 1A 03 08 C8 01 76 16 00"
+    );
+    assert_eq!(
+        hex(&cobs.encode(&[0x08, 0x02, 0x1A, 0x02, 0x08, 0x01])),
+        "09 08 02 1A 02 08 01 35 C3 00"
+    );
+    assert_eq!(
+        hex(&cobs.encode(&[0x01, 0x10, 0xAC, 0x02])),
+        "07 01 10 AC 02 46 C9 00"
+    );
+    let fixed = build_framer(&FramingConfig {
+        kind: FramingType::FixedLen,
+        len_bytes: 2,
+        sync_word: vec![0xAA, 0x55],
+        crc: CrcKind::Crc16CcittFalse,
+        ..Default::default()
+    });
+    assert_eq!(
+        hex(&fixed.encode(&[0x08, 0x01, 0x12, 0x00])),
+        "AA 55 06 00 08 01 12 00 22 53"
+    );
+    let slip = build_framer(&FramingConfig {
+        kind: FramingType::Slip,
+        crc: CrcKind::None,
+        ..Default::default()
+    });
+    assert_eq!(
+        hex(&slip.encode(&[0x01, 0xC0, 0xDB])),
+        "C0 01 DB DC DB DD C0"
+    );
+    let varint = build_framer(&FramingConfig {
+        kind: FramingType::VarintLen,
+        crc: CrcKind::Crc8,
+        ..Default::default()
+    });
+    let crc8 = Crc::new(CrcKind::Crc8, Endian::Little).compute(&[0x08, 0x01, 0x12, 0x00]) as u8;
+    assert_eq!(
+        varint.encode(&[0x08, 0x01, 0x12, 0x00]),
+        vec![0x05, 0x08, 0x01, 0x12, 0x00, crc8]
+    );
+}

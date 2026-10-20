@@ -1,0 +1,70 @@
+# Design decisions
+
+Where the build specification left room, these are the choices made, with the reason for each.
+
+## Stack and architecture
+
+1. **egui 0.36, egui_dock 0.21, egui_plot 0.37.** The newest egui_dock (0.21) depends on egui 0.36, so eframe/egui are pinned to 0.36 and egui_plot to 0.37, the release built for egui 0.36. Mixing egui versions does not compile.
+2. **Threads and crossbeam, no tokio.** One I/O thread per connection and blocking transports with a 5 ms read timeout are simple, deterministic and fast enough (the 5 kHz loopback test shows no backlog). Sends go through a command channel to the same thread, so the UI never blocks on I/O.
+3. **Telemetry extraction runs on the I/O thread**, writing straight into per-channel ring buffers behind short-held `parking_lot::RwLock`s. Samples therefore cannot back up or be dropped. UI event queues (decoded messages, raw bytes, text) are bounded per subscriber (200,000 events); an overflow drops events and counts them as *dropped events*. That counter stands in for the spec's "dropped samples".
+4. **Own COBS implementation** instead of the `cobs` crate, so the framer works incrementally on the session's buffers. It has unit tests with the reference vectors, and the firmware snippets use the `cobs` crate, which is compatible.
+5. **Serial without libudev.** `serialport` is built without its `libudev` feature so the workspace builds without system libraries; on Linux, USB vendor/product IDs are read from sysfs instead.
+6. **The `sim` transport is injected.** `pb-core` cannot depend on `pb-sim`, so connectors take an optional simulator factory that the CLI and GUI pass in.
+7. **Clock injection.** `pb-core` uses a `Clock` trait. Correlation, device time and the simulator take explicit timestamps and are tested with a manual clock. The sequence runner measures waits with real time because it runs against a real session.
+
+## Configuration
+
+8. **Extra keys** beyond the spec's example, all optional with defaults: `connection.profiles.reset_line`, `reset_pulse_ms`, `bind`, `target` (UDP), `file`/`speed` (replay); `fields.min`/`max` (alarm limits, besides `warn_min`/`warn_max`); `derived.format`; `telemetry.trigger`/`samples` (triggered mode); `simulator.garbage_rate`, `log_interval_ms`, `seed`; sequence-level `non_interactive` and `continue_on_failure`.
+9. **Migration.** A file without `config_version` is version 0. The only v0 differences defined are `framing.kind` → `framing.type` and `connection.default` → `connection.profile`. The point is the mechanism: older files keep opening.
+10. **Unknown keys** in `project.toml` are warnings, as specified. **Sequence files are strict** (unknown keys are errors), because a typo in a test step should stop the test, not be silently ignored.
+11. **Payload `bytes`** accept base64 (Protobuf JSON mapping), arrays of integers, or `"hex:…"` strings, because TOML has no bytes type.
+12. **Prompt values** are parsed as TOML values; text that is not valid TOML is sent as a string, so typing `hello` works without quotes.
+
+## Wire format
+
+13. **Length prefixes count the CRC**: `length = len(payload) + len(crc)`, i.e. everything after the length field. This is the common convention for "length of what follows".
+14. **Two-byte message IDs are little-endian**, like most small MCUs.
+15. **Text passthrough.** A line is the bytes before `\n` that start with 0x21–0x7E and contain only printable ASCII, tab or CR. For COBS and SLIP, lines may sit between frames. For length-prefixed framing, lines are recognised only with a sync word, because without one a length byte cannot be told apart from text.
+16. **Resynchronisation.** Delimited framers lose at most the frame that garbage ran into. Length framers drop one byte and search again after a bad length or CRC, and report one error per episode, not one per byte.
+17. **Simulator corruption** flips one bit of a framed frame, never the trailing delimiter and never into a delimiter value, so a corrupted frame shows up as a CRC error (or a COBS framing error if the code byte was hit) and does not merge with the next frame. Garbage bursts are 1–8 random bytes.
+
+## Codec and correlation
+
+18. **Field paths in id_prefix/fixed modes** may start with the message's own name (`telemetry.vout_raw` against `demo.Telemetry`); that segment is skipped. This keeps channel names the same across dispatch modes.
+19. **A repeated field without an index** selects all elements, the same as `[*]`.
+20. **Presence.** Unset oneof members and unset message fields produce no channel samples; unset proto3 scalars produce their default (0), as the wire format cannot tell them apart.
+21. **Sequence IDs** start at 1, skip 0 (0 marks unsolicited messages), and wrap at 2³¹−1 so they fit `int32` fields. Retries resend the same bytes with the same ID.
+22. **A reply with the right ID but the wrong type** resolves the request as an error ("expected `pong`, got `ack`") instead of waiting for the timeout.
+23. **Without `response_field`**, or for request types that have no sequence field, the oldest outstanding request expecting the received type takes the reply.
+24. **Poll telemetry** requests use no retries; the next poll comes soon anyway.
+
+## Telemetry
+
+25. **Channel values are stored in engineering units** (after `[[fields]]` scale and offset). Enum and bool channels are not scaled.
+26. **Derived expressions see raw field values** from the current message first, so `telemetry.vout_raw * 0.0503 * …` in the demo works as written. Then field paths in the message, then the latest channel values. A derived channel updates only when one of its inputs is in the current message.
+27. **Device timestamps** are anchored to the host time of the first sample and keep the device's spacing afterwards. Channels from device- and host-timestamped messages then share one time axis. A backwards jump of more than one second re-anchors (device reset).
+28. **Statistics** (`std`) are population standard deviation. The live `rate_hz` is (count − 1) / time span. In a sequence capture, `rate_hz` is count / capture duration.
+29. **Min/max decimation** keeps one point outside each edge of the view so lines reach the borders.
+
+## Recording and export
+
+30. **Session records** hold codec bytes (framing and CRC removed) for `rx_frame` and `tx_frame`, not raw transport chunks. This makes recordings independent of the framing, lets `decode` work from the embedded schema alone, and lets replay re-frame them with the current project's framing.
+31. **Replay** plays received frames and text lines with their original spacing divided by `speed`; sent frames are not replayed, and writes to a replay are dropped.
+32. **MCAP topics** are `/rx/<member>` and `/tx/<member>` in envelope mode (one channel per message type, the payload being the member message), `/rx/<Type>` otherwise; text lines and markers go to `/text` and `/markers` with JSON encoding. Log time is the recording's start time plus the host offset, so viewers show wall-clock time.
+33. **CSV time** is in seconds on the session clock (device-anchored where configured).
+
+## Sequences
+
+34. **A failing step skips the rest** by default (they are reported as skipped), as a bring-up test usually makes no sense after a failure. `continue_on_failure = true` changes that.
+35. **Loops are not test cases**; each executed inner step is, numbered `7.2.1` (loop at step 7, iteration 2, inner step 1). The spec's smoke sequence therefore reports 10 steps.
+36. **`within`** is an absolute tolerance used together with `eq`.
+37. **Exit code 2** for `run` covers project errors, unknown profiles, failed connections, and steps that error with "not connected"; assertion failures and timeouts give 1.
+38. **The demo's `smoke.toml`** sets `non_interactive = "continue"`, so the specified command `protobench run … --sequence smoke --profile sim` passes without flags while other sequences default to `fail`.
+
+## GUI
+
+39. **Two Y axes.** egui_plot has one transform per plot, so Y2 traces are linearly mapped into the Y1 range and the right axis labels show Y2 values.
+40. **`layout.json`** is the serialized `egui_dock` state. Rectangles of panes that were never drawn are infinite, which JSON cannot represent, so they are written as 0; they are recomputed on the next frame.
+41. **The smoke test** renders real frames without a display through `egui::Context::run_ui`, driving the same `AppState` actions the buttons call; `--window` repeats the run in a real window. This covers acceptance criteria 4 and 5 in CI environments without a GPU.
+42. **Badges of composer sends** are keyed `composer: <message>`, so they do not overwrite the badges of configured buttons.
+43. **The project editor** updates `[framing]` keys in place (comments survive) but rewrites the `[[connection.profiles]]` array, writing only non-default keys; comments inside profiles are lost. "Save as button" appends with `toml_edit` and keeps everything else.

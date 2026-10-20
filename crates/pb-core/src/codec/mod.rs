@@ -597,6 +597,42 @@ mod tests {
     }
 
     #[test]
+    fn documented_payload_bytes() {
+        // docs/FIRMWARE_INTEGRATION.md, "Worked examples".
+        let s = demo_schema();
+        let c = Codec::new(&demo_cfg(), &s, Role::Host).unwrap();
+        let dev = Codec::new(&demo_cfg(), &s, Role::Device).unwrap();
+        let seq = FieldPath::parse("seq").unwrap();
+        let mut m = c
+            .build(&c.resolve_tx("ping").unwrap(), serde_json::json!({}))
+            .unwrap();
+        set_int_at_path(&mut m, &seq, 1);
+        assert_eq!(c.encode(&m).unwrap(), vec![0x08, 0x01, 0x12, 0x00]);
+        let mut m = c
+            .build(
+                &c.resolve_tx("set_bias").unwrap(),
+                serde_json::json!({"millivolts": 200}),
+            )
+            .unwrap();
+        set_int_at_path(&mut m, &seq, 2);
+        assert_eq!(
+            c.encode(&m).unwrap(),
+            vec![0x08, 0x02, 0x1A, 0x03, 0x08, 0xC8, 0x01]
+        );
+        let mut m = dev
+            .build(
+                &dev.resolve_tx("ack").unwrap(),
+                serde_json::json!({"ok": true}),
+            )
+            .unwrap();
+        set_int_at_path(&mut m, &seq, 2);
+        assert_eq!(
+            dev.encode(&m).unwrap(),
+            vec![0x08, 0x02, 0x1A, 0x02, 0x08, 0x01]
+        );
+    }
+
+    #[test]
     fn seq_get_set() {
         let s = demo_schema();
         let c = Codec::new(&demo_cfg(), &s, Role::Host).unwrap();

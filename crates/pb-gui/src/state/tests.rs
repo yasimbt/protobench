@@ -218,3 +218,24 @@ fn schema_diff_reports_renumbering() {
     assert!(d[0].contains("1 → 3"));
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn foxglove_toggle_follows_the_connection() {
+    let mut s = connected();
+    s.settings.foxglove_port = 0;
+    s.set_foxglove(true).unwrap();
+    let (addr, clients) = s.foxglove_status().expect("server running");
+    assert_eq!(clients, 0);
+    assert!(std::net::TcpStream::connect(addr).is_ok());
+    // Reconnecting restarts it; disconnecting stops it but keeps it wanted.
+    s.connect("sim").unwrap();
+    wait(&mut s, |s| s.connected());
+    assert!(s.foxglove_status().is_some());
+    s.disconnect();
+    assert!(s.foxglove_status().is_none());
+    assert!(s.foxglove_enabled);
+    s.connect("sim").unwrap();
+    assert!(s.foxglove_status().is_some());
+    s.set_foxglove(false).unwrap();
+    assert!(s.foxglove_status().is_none());
+}

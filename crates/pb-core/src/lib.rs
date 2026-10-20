@@ -12,6 +12,7 @@ pub mod commands;
 pub mod config;
 pub mod diag;
 pub mod error;
+pub mod foxglove;
 pub mod framing;
 pub mod project;
 pub mod recorder;
@@ -19,6 +20,7 @@ pub mod schema;
 pub mod sequence;
 pub mod session;
 pub mod telemetry;
+pub mod topics;
 pub mod transport;
 pub mod util;
 

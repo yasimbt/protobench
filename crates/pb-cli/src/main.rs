@@ -94,6 +94,12 @@ enum Command {
         /// Record the session to this `.pbsession` file.
         #[arg(long)]
         record: Option<PathBuf>,
+        /// Serve live data to Foxglove (WebSocket protocol) on this port.
+        #[arg(long, value_name = "PORT")]
+        foxglove: Option<u16>,
+        /// Address the Foxglove server binds (use 0.0.0.0 for other machines).
+        #[arg(long, default_value = "127.0.0.1")]
+        foxglove_bind: String,
     },
     /// Run a test sequence and write JSON and JUnit reports.
     Run {
@@ -193,6 +199,8 @@ fn main() -> ExitCode {
             send,
             duration,
             record,
+            foxglove,
+            foxglove_bind,
         } => cmd::monitor(cmd::MonitorArgs {
             project,
             profile,
@@ -202,6 +210,8 @@ fn main() -> ExitCode {
             send,
             duration,
             record,
+            foxglove,
+            foxglove_bind,
         }),
         Command::Run {
             project,

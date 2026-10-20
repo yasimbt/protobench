@@ -15,4 +15,6 @@ toml.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+base64.workspace = true
 mcap.workspace = true
+tungstenite.workspace = true

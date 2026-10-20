@@ -27,6 +27,7 @@ thiserror.workspace = true
 toml.workspace = true
 toml_edit.workspace = true
 tracing.workspace = true
+tungstenite.workspace = true
 miette.workspace = true
 
 [dev-dependencies]

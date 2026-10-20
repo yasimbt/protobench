@@ -6,12 +6,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::io::BufWriter;
 use std::path::Path;
 
-use prost::Message as _;
-use prost_reflect::{ReflectMessage, Value};
-
 use super::OfflineSession;
 use crate::error::CoreError;
-use crate::session::RecordKind;
+use crate::session::{Direction, RecordKind};
+use crate::topics;
 
 fn err(e: impl std::fmt::Display) -> CoreError {
     CoreError::Recorder(format!("mcap: {e}"))
@@ -31,61 +29,23 @@ pub fn export_mcap(session: &OfflineSession, path: &Path) -> Result<usize, CoreE
     let mut count = 0usize;
     for d in session.decoded() {
         let log_time = base + d.record.host_ts_ns.saturating_sub(first);
-        let (topic, schema_name, data, encoding): (String, Option<String>, Vec<u8>, &str) =
-            match (&d.msg, d.record.kind) {
-                (Some(m), kind) => {
-                    let dir = if kind == RecordKind::TxFrame {
-                        "tx"
-                    } else {
-                        "rx"
-                    };
-                    // Envelope: publish the oneof member's message on its own topic.
-                    let inner = m
-                        .member
-                        .as_deref()
-                        .and_then(|name| {
-                            m.msg.get_field_by_name(name).map(|v| (name.to_string(), v))
-                        })
-                        .and_then(|(name, v)| match v.as_ref() {
-                            Value::Message(im) => Some((name, im.clone())),
-                            _ => None,
-                        });
-                    match inner {
-                        Some((name, im)) => (
-                            format!("/{dir}/{name}"),
-                            Some(im.descriptor().full_name().to_string()),
-                            im.encode_to_vec(),
-                            "protobuf",
-                        ),
-                        None => (
-                            format!(
-                                "/{dir}/{}",
-                                m.type_name.rsplit('.').next().unwrap_or(&m.type_name)
-                            ),
-                            Some(m.type_name.clone()),
-                            m.raw[m.payload_offset.min(m.raw.len())..].to_vec(),
-                            "protobuf",
-                        ),
-                    }
-                }
-                (None, RecordKind::TextLine) => (
-                    "/text".into(),
-                    None,
-                    serde_json::json!({ "text": String::from_utf8_lossy(&d.record.bytes) })
-                        .to_string()
-                        .into_bytes(),
-                    "json",
-                ),
-                (None, RecordKind::Marker) => (
-                    "/markers".into(),
-                    None,
-                    serde_json::json!({ "label": String::from_utf8_lossy(&d.record.bytes) })
-                        .to_string()
-                        .into_bytes(),
-                    "json",
-                ),
-                (None, _) => continue,
-            };
+        let tm = match (&d.msg, d.record.kind) {
+            (Some(m), RecordKind::TxFrame) => topics::for_message(m, Direction::Tx),
+            (Some(m), _) => topics::for_message(m, Direction::Rx),
+            (None, RecordKind::TextLine) => {
+                topics::for_text(&String::from_utf8_lossy(&d.record.bytes))
+            }
+            (None, RecordKind::Marker) => {
+                topics::for_marker(&String::from_utf8_lossy(&d.record.bytes))
+            }
+            (None, _) => continue,
+        };
+        let topics::TopicMessage {
+            topic,
+            schema_name,
+            encoding,
+            data,
+        } = tm;
         let schema_id = match &schema_name {
             Some(n) => match schemas.get(n) {
                 Some(id) => *id,

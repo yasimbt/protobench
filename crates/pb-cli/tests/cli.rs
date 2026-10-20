@@ -404,3 +404,42 @@ fn run_scripted_exits_0() {
     );
     let _ = std::fs::remove_dir_all(reports);
 }
+
+#[test]
+fn monitor_serves_foxglove() {
+    use std::io::BufRead;
+    use tungstenite::client::IntoClientRequest;
+    let mut child = bin()
+        .args(["monitor", "--project"])
+        .arg(demo())
+        .args(["--profile", "sim", "--duration", "20", "--foxglove", "0"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut err = std::io::BufReader::new(child.stderr.take().unwrap());
+    let mut line = String::new();
+    let url = loop {
+        line.clear();
+        assert!(err.read_line(&mut line).unwrap() > 0, "monitor exited");
+        if let Some(rest) = line.split("foxglove server on ").nth(1) {
+            break rest.split_whitespace().next().unwrap().to_string();
+        }
+    };
+    assert!(url.starts_with("ws://127.0.0.1:"), "{url}");
+    let mut req = url.into_client_request().unwrap();
+    req.headers_mut().insert(
+        "Sec-WebSocket-Protocol",
+        "foxglove.websocket.v1".parse().unwrap(),
+    );
+    let (mut ws, _) = tungstenite::connect(req).unwrap();
+    let info = loop {
+        if let tungstenite::Message::Text(t) = ws.read().unwrap() {
+            break serde_json::from_str::<serde_json::Value>(t.as_str()).unwrap();
+        }
+    };
+    assert_eq!(info["op"], "serverInfo");
+    assert_eq!(info["name"], "ProtoBench: Demo Sensor");
+    let _ = child.kill();
+    let _ = child.wait();
+}

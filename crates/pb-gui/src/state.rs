@@ -33,6 +33,10 @@ pub struct Settings {
     pub fps_cap: u32,
     /// Recordings folder; default `<project>/recordings`.
     pub recordings_dir: Option<PathBuf>,
+    /// Foxglove WebSocket server port (8765 is Foxglove's default).
+    pub foxglove_port: u16,
+    /// Address the Foxglove server binds; `0.0.0.0` serves other machines.
+    pub foxglove_bind: String,
 }
 
 impl Default for Settings {
@@ -42,6 +46,8 @@ impl Default for Settings {
             capacity: pb_core::telemetry::DEFAULT_CAPACITY,
             fps_cap: 60,
             recordings_dir: None,
+            foxglove_port: 8765,
+            foxglove_bind: "127.0.0.1".into(),
         }
     }
 }
@@ -307,6 +313,9 @@ pub struct AppState {
     jobs_rx: Receiver<JobResult>,
     /// Answer channel for an operator prompt from a running sequence.
     pub operator_reply: Option<Sender<bool>>,
+    /// Foxglove server wanted (survives reconnects).
+    pub foxglove_enabled: bool,
+    foxglove: Option<pb_core::foxglove::FoxgloveServer>,
 }
 
 impl Default for AppState {
@@ -348,6 +357,8 @@ impl AppState {
             jobs_tx,
             jobs_rx,
             operator_reply: None,
+            foxglove_enabled: false,
+            foxglove: None,
         }
     }
 
@@ -491,12 +502,69 @@ impl AppState {
         self.profile = Some(profile.to_string());
         self.badges.clear();
         self.notify(format!("connecting: {}", prof.endpoint()));
+        if self.foxglove_enabled {
+            if let Err(e) = self.start_foxglove() {
+                self.notify(format!("Foxglove server: {e}"));
+            }
+        }
         Ok(())
+    }
+
+    // ---------- foxglove ----------
+
+    /// Starts the Foxglove server for the current session.
+    fn start_foxglove(&mut self) -> Result<(), String> {
+        self.foxglove = None;
+        let s = self.session.as_ref().ok_or("not connected")?;
+        let p = self.project.as_ref().ok_or("no project open")?;
+        let fds = p
+            .require_schema()
+            .map_err(|e| e.to_string())?
+            .fds_bytes()
+            .to_vec();
+        let server = pb_core::foxglove::FoxgloveServer::start(
+            &self.settings.foxglove_bind,
+            self.settings.foxglove_port,
+            &format!("ProtoBench: {}", p.config.name),
+            &fds,
+            &pb_core::topics::known_topics(s.codec()),
+        )
+        .map_err(|e| e.to_string())?;
+        server.attach(s.subscribe(), s.wall_offset_ns());
+        let addr = server.local_addr();
+        self.foxglove = Some(server);
+        self.notify(format!("Foxglove server on ws://{addr}"));
+        Ok(())
+    }
+
+    /// Turns the Foxglove server on or off. While on, it follows the
+    /// connection: it starts with each session and stops on disconnect.
+    pub fn set_foxglove(&mut self, on: bool) -> Result<(), String> {
+        self.foxglove_enabled = on;
+        if !on {
+            if self.foxglove.take().is_some() {
+                self.notify("Foxglove server stopped");
+            }
+            return Ok(());
+        }
+        if self.session.is_some() {
+            self.start_foxglove()
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Address and client count of the running Foxglove server.
+    pub fn foxglove_status(&self) -> Option<(std::net::SocketAddr, usize)> {
+        self.foxglove
+            .as_ref()
+            .map(|f| (f.local_addr(), f.client_count()))
     }
 
     /// Disconnects (stops any recording).
     pub fn disconnect(&mut self) {
         self.stop_recording();
+        self.foxglove = None;
         self.events = None;
         if self.session.take().is_some() {
             self.notify("disconnected");

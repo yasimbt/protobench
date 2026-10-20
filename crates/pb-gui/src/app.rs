@@ -516,6 +516,21 @@ impl ProtoBenchApp {
                 if ui.button("Project editor").clicked() {
                     self.windows.editor = true;
                 }
+                ui.separator();
+                let mut on = self.state.foxglove_enabled;
+                let label = match self.state.foxglove_status() {
+                    Some((addr, n)) => format!("Foxglove server (ws://{addr}, {n} clients)"),
+                    None => "Foxglove server".to_string(),
+                };
+                if ui
+                    .checkbox(&mut on, label)
+                    .on_hover_text("Serve live data to Foxglove; port in Settings")
+                    .changed()
+                {
+                    if let Err(e) = self.state.set_foxglove(on) {
+                        self.state.notify(format!("Foxglove server: {e}"));
+                    }
+                }
                 let triggers = self
                     .state
                     .session
@@ -617,6 +632,11 @@ impl ProtoBenchApp {
                     ui.separator();
                     ui.label(RichText::new(format!("● REC {e:.1} s")).color(Color32::RED));
                 }
+            }
+            if let Some((addr, n)) = self.state.foxglove_status() {
+                ui.separator();
+                ui.label(format!("Foxglove {addr} · {n}"))
+                    .on_hover_text("Foxglove WebSocket server: address · connected clients");
             }
             if let Some((t, n)) = self.state.notifications.back() {
                 if t.elapsed() < Duration::from_secs(8) {

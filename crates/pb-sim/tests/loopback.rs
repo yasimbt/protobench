@@ -514,3 +514,86 @@ fn scripted_demo_sequence_passes() {
     assert_eq!(r.log.last().unwrap(), "Sweep done, bias left at 300 mV");
     assert!(r.log.iter().any(|l| l.starts_with("current: mean")));
 }
+
+/// Foxglove WebSocket server fed by a live simulator session: a tungstenite
+/// client sees serverInfo and advertise, subscribes to telemetry and decodes
+/// a message with the advertised schema alone.
+#[test]
+fn foxglove_server_streams_live_telemetry() {
+    use base64::Engine as _;
+    use tungstenite::client::IntoClientRequest;
+    use tungstenite::Message;
+
+    let p = demo();
+    let s = start(&p, "sim", None);
+    let fds = p.schema.as_ref().unwrap().fds_bytes().to_vec();
+    let fox = pb_core::foxglove::FoxgloveServer::start(
+        "127.0.0.1",
+        0,
+        &p.config.name,
+        &fds,
+        &pb_core::topics::known_topics(s.codec()),
+    )
+    .unwrap();
+    let _feed = fox.attach(s.subscribe(), s.wall_offset_ns());
+
+    let mut req = format!("ws://{}", fox.local_addr())
+        .into_client_request()
+        .unwrap();
+    req.headers_mut().insert(
+        "Sec-WebSocket-Protocol",
+        pb_core::foxglove::SUBPROTOCOL.parse().unwrap(),
+    );
+    let (mut ws, _) = tungstenite::connect(req).unwrap();
+    let mut next_json = || loop {
+        if let Message::Text(t) = ws.read().unwrap() {
+            return serde_json::from_str::<serde_json::Value>(t.as_str()).unwrap();
+        }
+    };
+    assert_eq!(next_json()["op"], "serverInfo");
+    let adv = next_json();
+    assert_eq!(adv["op"], "advertise");
+    let chan = adv["channels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["topic"] == "/rx/telemetry")
+        .expect("telemetry channel")
+        .clone();
+    assert_eq!(chan["schemaName"], "demo.Telemetry");
+    ws.send(Message::text(
+        serde_json::json!({"op": "subscribe", "subscriptions": [{"id": 1, "channelId": chan["id"]}]})
+            .to_string(),
+    ))
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(100));
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos() as u64;
+    assert!(send(&s, &p, "Start Stream").is_ok());
+
+    let bin = loop {
+        if let Message::Binary(b) = ws.read().unwrap() {
+            break b;
+        }
+    };
+    assert_eq!(bin[0], 0x01);
+    assert_eq!(u32::from_le_bytes(bin[1..5].try_into().unwrap()), 1);
+    let log_time = u64::from_le_bytes(bin[5..13].try_into().unwrap());
+    // Unix time, close to now.
+    assert!(log_time + 2_000_000_000 > before && log_time < before + 5_000_000_000);
+
+    // Decode with nothing but the advertised schema.
+    let schema = base64::engine::general_purpose::STANDARD
+        .decode(chan["schema"].as_str().unwrap())
+        .unwrap();
+    let pool = prost_reflect::DescriptorPool::decode(schema.as_slice()).unwrap();
+    let desc = pool.get_message_by_name("demo.Telemetry").unwrap();
+    let msg = prost_reflect::DynamicMessage::decode(desc, &bin[13..]).unwrap();
+    let vout = msg.get_field_by_name("vout_raw").unwrap().as_u32().unwrap();
+    assert!((50..=3200).contains(&vout), "{vout}");
+    let (published, dropped) = fox.counters();
+    assert!(published >= 1);
+    assert_eq!(dropped, 0);
+}

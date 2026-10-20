@@ -956,8 +956,20 @@ pub fn settings(ui: &mut egui::Ui, s: &mut Settings) {
             }
         });
         ui.end_row();
+        ui.label("Foxglove server");
+        ui.horizontal(|ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut s.foxglove_bind)
+                    .desired_width(110.0)
+                    .hint_text("127.0.0.1"),
+            )
+            .on_hover_text("0.0.0.0 serves other machines on the network");
+            ui.label(":");
+            ui.add(egui::DragValue::new(&mut s.foxglove_port).range(0..=65535));
+        });
+        ui.end_row();
     });
-    ui.weak("The ring-buffer size applies on the next connect.");
+    ui.weak("The ring-buffer size applies on the next connect, the Foxglove address when the server next starts.");
 }
 
 // ---------------------------------------------------------------- project editor

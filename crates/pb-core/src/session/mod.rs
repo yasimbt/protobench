@@ -564,6 +564,11 @@ impl Session {
         self.shared.clock.now_ns()
     }
 
+    /// Add to a session timestamp to get Unix time in ns.
+    pub fn wall_offset_ns(&self) -> u64 {
+        wall_offset(&self.shared)
+    }
+
     /// Waits until connected or `timeout`. Returns the final state.
     pub fn wait_connected(&self, timeout: Duration) -> ConnState {
         let deadline = std::time::Instant::now() + timeout;
@@ -649,6 +654,15 @@ impl SessionHandle {
     pub fn now_ns(&self) -> u64 {
         self.shared.clock.now_ns()
     }
+
+    /// Add to a session timestamp to get Unix time in ns.
+    pub fn wall_offset_ns(&self) -> u64 {
+        wall_offset(&self.shared)
+    }
+}
+
+fn wall_offset(shared: &Shared) -> u64 {
+    shared.clock.wall_ns().saturating_sub(shared.clock.now_ns())
 }
 
 impl Drop for Session {

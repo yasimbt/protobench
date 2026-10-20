@@ -274,12 +274,34 @@ pub struct MonitorArgs {
     pub send: Vec<String>,
     pub duration: Option<f64>,
     pub record: Option<PathBuf>,
+    pub foxglove: Option<u16>,
+    pub foxglove_bind: String,
 }
 
 pub fn monitor(a: MonitorArgs) -> Result<ExitCode> {
     let p = open_project(&a.project)?;
     let session = connect(&p, a.profile.as_deref(), a.port.clone())?;
     let events = session.subscribe();
+    // Keep the server alive for the whole monitor run.
+    let _foxglove = match a.foxglove {
+        Some(port) => {
+            let fds = p.require_schema()?.fds_bytes().to_vec();
+            let server = pb_core::foxglove::FoxgloveServer::start(
+                &a.foxglove_bind,
+                port,
+                &format!("ProtoBench: {}", p.config.name),
+                &fds,
+                &pb_core::topics::known_topics(session.codec()),
+            )?;
+            server.attach(session.subscribe(), session.wall_offset_ns());
+            eprintln!(
+                "foxglove server on ws://{} (open it in Foxglove: Open connection ▸ Foxglove WebSocket)",
+                server.local_addr()
+            );
+            Some(server)
+        }
+        None => None,
+    };
     if let Some(path) = &a.record {
         let w = pb_core::recorder::SessionWriter::create(path, &p)?;
         session.start_recording(Box::new(w));

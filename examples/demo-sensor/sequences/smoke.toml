@@ -1,5 +1,7 @@
 name = "Bring-up smoke test"
 description = "Ping, set bias, capture stream, check limits"
+# Headless runs auto-confirm prompt_operator steps (override with --non-interactive).
+non_interactive = "continue"
 
 [vars]
 bias_mv = 200

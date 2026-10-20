@@ -188,3 +188,104 @@ fn recording_round_trip_reproduces_messages() {
     assert!(store.get("telemetry.vout_raw").unwrap().total() > 100);
     let _ = std::fs::remove_file(path);
 }
+
+fn run_smoke(p: &Project, profile: &str, port: Option<String>) -> pb_core::sequence::RunReport {
+    let s = start(p, profile, port);
+    let seq = pb_core::sequence::SequenceFile::load(&p.sequence_path("smoke")).unwrap();
+    let mut ev = |_e: pb_core::sequence::RunEvent| {};
+    pb_core::sequence::run_sequence(&s, &p.config, &seq, Default::default(), &mut ev, None)
+}
+
+#[test]
+fn smoke_sequence_passes_on_loopback() {
+    let p = demo();
+    let r = run_smoke(&p, "sim", None);
+    assert!(r.passed, "{}", r.summary_text());
+    // 7 top-level steps + 3 loop iterations (the loop itself is not a step).
+    assert_eq!(r.summary.total, 10, "{}", r.summary_text());
+    let cap = r.steps.iter().find(|s| s.action == "capture").unwrap();
+    assert_eq!(cap.assertions.len(), 3);
+    assert!(cap.measured.contains_key("telemetry.current_na"));
+    let x = r.to_junit();
+    assert_eq!(x.matches("<testcase ").count(), 10);
+}
+
+#[test]
+fn smoke_sequence_passes_over_tcp() {
+    let p = demo();
+    let (port, stop) = pb_sim::spawn_tcp_server(&p).unwrap();
+    let r = run_smoke(&p, "net", Some(format!("127.0.0.1:{port}")));
+    assert!(r.passed, "{}", r.summary_text());
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+#[test]
+fn failing_assertion_fails_and_skips_the_rest() {
+    let p = demo();
+    let s = start(&p, "sim", None);
+    let src = r#"
+name = "neg"
+[[steps]]
+action = "send"
+command = "Set Bias"
+payload = { millivolts = 5 }
+expect = "ack"
+assert = [ { path = "ack.ok", eq = false } ]
+[[steps]]
+action = "prompt_operator"
+message = "never shown"
+"#;
+    let seq =
+        pb_core::sequence::SequenceFile::parse(src, std::path::Path::new("neg.toml")).unwrap();
+    let mut ev = |_e: pb_core::sequence::RunEvent| {};
+    let r = pb_core::sequence::run_sequence(&s, &p.config, &seq, Default::default(), &mut ev, None);
+    assert!(!r.passed);
+    assert_eq!(r.steps[0].status, pb_core::sequence::StepStatus::Fail);
+    assert_eq!(r.steps[1].status, pb_core::sequence::StepStatus::Skipped);
+    // Headless prompt defaults to fail.
+    let src = "[[steps]]\naction = \"prompt_operator\"\nmessage = \"x\"\n";
+    let seq = pb_core::sequence::SequenceFile::parse(src, std::path::Path::new("p.toml")).unwrap();
+    let r = pb_core::sequence::run_sequence(&s, &p.config, &seq, Default::default(), &mut ev, None);
+    assert!(!r.passed);
+}
+
+#[test]
+fn expect_set_save_and_vars() {
+    let p = demo();
+    let s = start(&p, "sim", None);
+    let src = r#"
+[vars]
+cmd = "Ping"
+[[steps]]
+action = "send"
+command = "${cmd}"
+save = { fw = "pong.firmware" }
+[[steps]]
+action = "set"
+var = "rate"
+value = 500
+[[steps]]
+action = "send"
+message = "stream_ctrl"
+payload = { enable = true, rate_hz = "${rate}" }
+expect = "ack"
+[[steps]]
+action = "expect"
+message = "telemetry"
+timeout_ms = 1000
+assert = [ { path = "telemetry.vout_raw", min = 0, max = 4095 } ]
+[[steps]]
+action = "capture"
+channels = ["telemetry.vout_raw"]
+samples = 100
+assert = [ { channel = "telemetry.vout_raw", stat = "count", min = 100 } ]
+[[steps]]
+action = "log"
+text = "fw=${fw} rate=${rate}"
+"#;
+    let seq = pb_core::sequence::SequenceFile::parse(src, std::path::Path::new("v.toml")).unwrap();
+    let mut ev = |_e: pb_core::sequence::RunEvent| {};
+    let r = pb_core::sequence::run_sequence(&s, &p.config, &seq, Default::default(), &mut ev, None);
+    assert!(r.passed, "{}", r.summary_text());
+    assert_eq!(r.log, vec!["fw= rate=500".to_string()]);
+}

@@ -372,6 +372,45 @@ With `[[devices]]` (see *Multiple devices*), `monitor` and `run` start every dev
 
 `--log debug` (or `info`, `pb_core=trace`, …) prints diagnostics to stderr.
 
+## Python
+
+The `protobench` Python module drives projects from pytest, notebooks or an existing test rig, with the same sessions, devices and sequences as the CLI. Build and install it into the active environment with [maturin](https://www.maturin.rs/):
+
+```sh
+pip install maturin
+maturin develop --release -m crates/pb-py/Cargo.toml
+```
+
+(`maturin build --release -m crates/pb-py/Cargo.toml` makes a wheel instead; one wheel serves CPython 3.9 and later.)
+
+```python
+import time
+import protobench
+
+p = protobench.Project("examples/demo-sensor")
+with p.connect(profile="sim") as s:              # every device; profiles={"ref": "usb"}, only=["main"]
+    print(s.send("Ping"))                        # {'status': 'ok', 'response': {...}, 'latency_ms': 5.4, 'attempts': 1}
+    s.send("Set Bias", millivolts=300)           # keyword arguments override payload fields
+    s.send_msg("set_bias", {"millivolts": 5}, expect="ack")
+    s.send("Start Stream")
+    reading = s.wait("telemetry", timeout_s=1)   # the next message of a type, or TimeoutError
+    time.sleep(1)
+    print(s.stats("telemetry.vout_raw")["mean"]) # count, mean, min, max, std, rate_hz, last
+    t, v = s.samples("telemetry.vout_raw", since_s=None)
+    for m in s.messages(timeout_s=0.5):          # received messages until 0.5 s of silence
+        print(m["name"], m["msg"])
+    ref = s.device("ref")                        # the same methods for another device,
+    print(ref.last("reading.vout_mv"))           # with its own channel names
+    report = s.run_sequence("smoke", vars={"load_ohms": 4700})
+    print(report["passed"], report["summary"])
+
+rows = protobench.decode("recordings/demo.pbsession")
+protobench.export_csv("recordings/demo.pbsession", "demo.csv", channels=["telemetry.vout_raw"])
+protobench.export_parquet("recordings/demo.pbsession", "demo.parquet", range=(1.0, 5.0))
+```
+
+Messages and replies are dicts in protobuf JSON form (field names in lowerCamelCase, as `decode --json` prints them). A reply that `send` returned is not offered again to `wait`. Errors raise Python exceptions: `ConnectionError` when a device cannot connect or is not connected, `KeyError` for an unknown device, command, message or channel, `TimeoutError` from `wait`, `ValueError` for a project with errors. Connecting, sending, waiting and running sequences release the GIL, so other Python threads keep running. `examples/demo-sensor/python/smoke.py` is a complete script.
+
 ## Simulator
 
 The simulator in `[simulator]` plays the device: it decodes the host's requests with the project's schema, framing and codec, answers configured requests with generated payloads (echoing the sequence ID), toggles streams, and sends telemetry built from generators (`sine`, `noise`, `ramp`, `enum_cycle`, `time_us`, …). It can add latency, drop frames, corrupt them after the CRC, insert garbage between frames, and print firmware-style log lines. Use it through a `transport = "sim"` profile (in-process) or `protobench sim --tcp 9000`.

@@ -11,6 +11,7 @@ ProtoBench is a desktop and command-line tool for developing and testing embedde
 - A live Foxglove WebSocket server, so Foxglove's panels show the device while you work.
 - Test sequences in TOML with JSON and JUnit reports, sandboxed Rhai scripts for sweeps and custom logic, and `protobench check` to catch broken projects in CI.
 - Several different devices at once (`[[devices]]`): the board under test next to a reference meter, each with its own `.proto` and settings, on one time axis, in one recording, and driven by one sequence.
+- A Python module (`import protobench`) for pytest, notebooks and existing test rigs: send commands, wait for messages, read channels, run sequences, decode recordings.
 
 <!-- Screenshot: docs/images/dashboard.png (main window with the demo project connected to the simulator) -->
 

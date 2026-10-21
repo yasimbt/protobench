@@ -1,0 +1,19 @@
+[package]
+name = "pb-py"
+description = "ProtoBench Python bindings (the `protobench` module)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "protobench"
+# Only a Python extension: an rlib would need libpython to link tests.
+crate-type = ["cdylib"]
+
+[dependencies]
+pb-core.workspace = true
+pb-sim.workspace = true
+crossbeam-channel.workspace = true
+parking_lot.workspace = true
+pyo3.workspace = true
+serde_json.workspace = true

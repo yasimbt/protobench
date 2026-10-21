@@ -1,0 +1,18 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "protobench"
+description = "Drive ProtoBench projects (Protocol Buffers devices) from Python"
+requires-python = ">=3.9"
+license = { text = "MIT OR Apache-2.0" }
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+dynamic = ["version"]
+
+[tool.maturin]
+# One wheel for every CPython from 3.9 on (abi3).
+features = ["pyo3/extension-module"]

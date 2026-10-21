@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
-members = ["crates/pb-core", "crates/pb-sim", "crates/pb-gui", "crates/pb-cli"]
+members = ["crates/pb-core", "crates/pb-sim", "crates/pb-gui", "crates/pb-cli", "crates/pb-py"]
+# pb-py needs Python to build; plain `cargo build` leaves it out.
+default-members = ["crates/pb-core", "crates/pb-sim", "crates/pb-gui", "crates/pb-cli"]
 
 [workspace.package]
 version = "0.1.0"
@@ -41,6 +43,7 @@ rustls-native-certs = "0.8"
 socketcan = { version = "4", default-features = false }
 probe-rs = { version = "0.32", default-features = false, features = ["builtin-targets", "object"] }
 object = { version = "0.39", default-features = false, features = ["read_core", "elf", "std"] }
+pyo3 = { version = "0.30", features = ["abi3-py39", "extension-module"] }
 rustls-pki-types = { version = "1.12", features = ["std"] }
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 rfd = "0.17.2"

@@ -92,3 +92,8 @@ Where the build specification left room, these are the choices made, with the re
 62. **The subprotocol is selected when offered.** A client that does not offer `foxglove.websocket.v1` is still served (the reply then has no `Sec-WebSocket-Protocol`), which helps debugging with generic WebSocket tools.
 63. **Parquet layout = joined CSV.** `time_s` (non-null `float64`) plus one nullable `float64` column per channel, as-of joined on the union of timestamps by the same code as the joined CSV, so both exports always have the same rows. Column names are the channel names. Snappy compression; rows are handed to the writer in batches of 65,536.
 64. **Parquet is a default-on cargo feature** (`pb-core/parquet`) because `parquet`/`arrow` add about 40 s to a clean build. Without it, `export_parquet` still exists and returns "this build has no Parquet support", so the CLI and GUI need no conditional code.
+
+## Round 4
+
+65. **`port = "auto"` needs exactly one match.** Round 1 opened the first port matching `usb_vid`/`usb_pid`, so with two identical boards attached the choice depended on enumeration order and could change between reconnects. Now several matches are an error that lists each port with its USB serial number and says to set `usb_serial` (or to name the port, when the boards report no serial number). Without any filter, `auto` takes the only USB serial port, ignoring legacy ports such as `/dev/ttyS0`, and falls back to the only port when none is USB.
+66. **CI pins Rust 1.95.0**, the version the acceptance criteria name, so a new stable release with new clippy lints cannot turn a green branch red overnight. Moving to a newer toolchain is a deliberate one-line change.

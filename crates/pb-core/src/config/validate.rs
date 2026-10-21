@@ -75,11 +75,27 @@ pub fn validate(c: &ProjectConfig) -> Vec<Finding> {
                 key_path!["connection", "profiles", i],
                 "replay needs `file`".into(),
             ),
-            TransportKind::Serial if p.port == "auto" && p.usb_vid.is_none() => f.warn(
-                key_path!["connection", "profiles", i, "port"],
-                "port = \"auto\" without usb_vid picks the first serial port found".into(),
-            ),
+            TransportKind::Serial
+                if p.port == "auto"
+                    && p.usb_vid.is_none()
+                    && p.usb_pid.is_none()
+                    && p.usb_serial.is_none() =>
+            {
+                f.warn(
+                    key_path!["connection", "profiles", i, "port"],
+                    "port = \"auto\" without usb_vid, usb_pid or usb_serial only works with exactly one USB serial port attached".into(),
+                )
+            }
             _ => {}
+        }
+        if p.transport == TransportKind::Serial && p.port != "auto" && p.usb_serial.is_some() {
+            f.warn(
+                key_path!["connection", "profiles", i, "usb_serial"],
+                format!(
+                    "usb_serial is only used with port = \"auto\"; this profile opens `{}`",
+                    p.port
+                ),
+            );
         }
         if p.speed < 0.0 {
             f.err(

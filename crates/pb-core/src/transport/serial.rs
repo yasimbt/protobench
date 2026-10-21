@@ -16,8 +16,20 @@ pub struct PortInfo {
     pub vid: Option<u16>,
     /// USB product ID, when known.
     pub pid: Option<u16>,
+    /// USB serial number, when the device reports one.
+    pub serial_number: Option<String>,
     /// Manufacturer / product strings, when known.
     pub description: Option<String>,
+}
+
+impl PortInfo {
+    /// `0483:5740`, or `----:----` for ports without USB IDs.
+    pub fn usb_id(&self) -> String {
+        match (self.vid, self.pid) {
+            (Some(v), Some(p)) => format!("{v:04x}:{p:04x}"),
+            _ => "----:----".into(),
+        }
+    }
 }
 
 /// Writes all of `data`, retrying partial and timed-out writes until
@@ -71,11 +83,18 @@ pub fn list_ports() -> Vec<PortInfo> {
                 name: p.port_name.clone(),
                 vid: None,
                 pid: None,
+                serial_number: None,
                 description: None,
             };
             if let serialport::SerialPortType::UsbPort(u) = &p.port_type {
                 info.vid = Some(u.vid);
                 info.pid = Some(u.pid);
+                info.serial_number = u
+                    .serial_number
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string);
                 info.description = match (&u.manufacturer, &u.product) {
                     (Some(m), Some(p)) => Some(format!("{m} {p}")),
                     (None, Some(p)) => Some(p.clone()),
@@ -84,10 +103,11 @@ pub fn list_ports() -> Vec<PortInfo> {
                 };
             }
             if info.vid.is_none() {
-                if let Some((v, p, d)) = sysfs_usb_info(&info.name) {
-                    info.vid = Some(v);
-                    info.pid = Some(p);
-                    info.description = d;
+                if let Some(u) = sysfs_usb_info(&info.name) {
+                    info.vid = Some(u.vid);
+                    info.pid = Some(u.pid);
+                    info.serial_number = u.serial;
+                    info.description = u.product;
                 }
             }
             info
@@ -97,21 +117,36 @@ pub fn list_ports() -> Vec<PortInfo> {
     out
 }
 
+/// USB attributes read from sysfs.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+struct SysfsUsb {
+    vid: u16,
+    pid: u16,
+    serial: Option<String>,
+    product: Option<String>,
+}
+
 /// Reads USB IDs from sysfs (Linux without libudev).
 #[cfg(target_os = "linux")]
-fn sysfs_usb_info(port: &str) -> Option<(u16, u16, Option<String>)> {
+fn sysfs_usb_info(port: &str) -> Option<SysfsUsb> {
     let name = port.rsplit('/').next()?;
     let mut dir = std::fs::canonicalize(format!("/sys/class/tty/{name}/device")).ok()?;
+    let read = |dir: &std::path::Path, f: &str| {
+        std::fs::read_to_string(dir.join(f))
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
     for _ in 0..6 {
         let vid = std::fs::read_to_string(dir.join("idVendor"));
         let pid = std::fs::read_to_string(dir.join("idProduct"));
         if let (Ok(v), Ok(p)) = (vid, pid) {
-            let v = u16::from_str_radix(v.trim(), 16).ok()?;
-            let p = u16::from_str_radix(p.trim(), 16).ok()?;
-            let prod = std::fs::read_to_string(dir.join("product"))
-                .ok()
-                .map(|s| s.trim().to_string());
-            return Some((v, p, prod));
+            return Some(SysfsUsb {
+                vid: u16::from_str_radix(v.trim(), 16).ok()?,
+                pid: u16::from_str_radix(p.trim(), 16).ok()?,
+                serial: read(&dir, "serial"),
+                product: read(&dir, "product"),
+            });
         }
         dir = dir.parent()?.to_path_buf();
     }
@@ -119,30 +154,101 @@ fn sysfs_usb_info(port: &str) -> Option<(u16, u16, Option<String>)> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn sysfs_usb_info(_port: &str) -> Option<(u16, u16, Option<String>)> {
+fn sysfs_usb_info(_port: &str) -> Option<SysfsUsb> {
     None
 }
 
-/// Picks the port for a profile: an explicit name, or with `"auto"` the
-/// first port matching `usb_vid`/`usb_pid` (or the first port at all).
+/// Picks the port for a profile from the attached ports (see
+/// [`select_port`]).
 pub fn resolve_port(profile: &ConnectionProfile) -> Result<String, CoreError> {
     if profile.port != "auto" {
         return Ok(profile.port.clone());
     }
-    let ports = list_ports();
-    let found = ports.iter().find(|p| {
-        profile.usb_vid.is_none_or(|v| p.vid == Some(v))
-            && profile.usb_pid.is_none_or(|v| p.pid == Some(v))
-    });
-    match found {
-        Some(p) => Ok(p.name.clone()),
-        None => Err(CoreError::Transport(
-            match (profile.usb_vid, profile.usb_pid) {
-                (Some(v), Some(p)) => format!("no serial port with USB ID {v:04x}:{p:04x}"),
-                (Some(v), None) => format!("no serial port with USB vendor {v:04x}"),
-                _ => "no serial ports found".into(),
-            },
-        )),
+    select_port(profile, &list_ports())
+}
+
+/// Picks the port for a profile from `ports`. An explicit name is used as
+/// is. With `port = "auto"` exactly one port must match `usb_vid`,
+/// `usb_pid` and `usb_serial` (serial numbers compare case-insensitively);
+/// without any of them, the only USB serial port is taken (or the only
+/// port, when none is USB). Several matches are an error that lists them,
+/// so two identical boards never get mixed up.
+pub fn select_port(profile: &ConnectionProfile, ports: &[PortInfo]) -> Result<String, CoreError> {
+    if profile.port != "auto" {
+        return Ok(profile.port.clone());
+    }
+    let serial = profile
+        .usb_serial
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let filtered = profile.usb_vid.is_some() || profile.usb_pid.is_some() || serial.is_some();
+    let matches: Vec<&PortInfo> = if filtered {
+        ports
+            .iter()
+            .filter(|p| {
+                profile.usb_vid.is_none_or(|v| p.vid == Some(v))
+                    && profile.usb_pid.is_none_or(|v| p.pid == Some(v))
+                    && serial.is_none_or(|s| {
+                        p.serial_number
+                            .as_deref()
+                            .is_some_and(|n| n.trim().eq_ignore_ascii_case(s))
+                    })
+            })
+            .collect()
+    } else {
+        let usb: Vec<&PortInfo> = ports.iter().filter(|p| p.vid.is_some()).collect();
+        if usb.is_empty() {
+            ports.iter().collect()
+        } else {
+            usb
+        }
+    };
+    let what = match_description(profile.usb_vid, profile.usb_pid, serial);
+    match matches.as_slice() {
+        [one] => Ok(one.name.clone()),
+        [] => Err(CoreError::Transport(match what {
+            Some(w) => format!("no serial port with {w}"),
+            None => "no serial ports found".into(),
+        })),
+        many => {
+            let list = many
+                .iter()
+                .map(|p| match &p.serial_number {
+                    Some(s) => format!("{} (serial {s})", p.name),
+                    None => format!("{} (no serial number)", p.name),
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let hint = if many.iter().all(|p| p.serial_number.is_none()) {
+                "these ports report no USB serial numbers, so name the port (`port = \"COM5\"`) or pass --port"
+            } else if serial.is_some() {
+                "several ports report this serial number, so name the port or pass --port"
+            } else {
+                "set usb_serial in the profile to choose one (see `protobench list-ports`)"
+            };
+            Err(CoreError::Transport(format!(
+                "{} serial ports match {}: {list}; {hint}",
+                many.len(),
+                what.unwrap_or_else(|| "port = \"auto\"".into())
+            )))
+        }
+    }
+}
+
+/// `USB ID 0483:5740 and serial number X`, or None without any filter.
+fn match_description(vid: Option<u16>, pid: Option<u16>, serial: Option<&str>) -> Option<String> {
+    let id = match (vid, pid) {
+        (Some(v), Some(p)) => Some(format!("USB ID {v:04x}:{p:04x}")),
+        (Some(v), None) => Some(format!("USB vendor {v:04x}")),
+        (None, Some(p)) => Some(format!("USB product {p:04x}")),
+        (None, None) => None,
+    };
+    match (id, serial) {
+        (Some(id), Some(s)) => Some(format!("{id} and serial number {s}")),
+        (Some(id), None) => Some(id),
+        (None, Some(s)) => Some(format!("USB serial number {s}")),
+        (None, None) => None,
     }
 }
 
@@ -299,5 +405,106 @@ mod tests {
     #[test]
     fn listing_does_not_panic() {
         let _ = list_ports();
+    }
+
+    fn port(name: &str, ids: Option<(u16, u16)>, serial: Option<&str>) -> PortInfo {
+        PortInfo {
+            name: name.into(),
+            vid: ids.map(|i| i.0),
+            pid: ids.map(|i| i.1),
+            serial_number: serial.map(str::to_string),
+            description: None,
+        }
+    }
+
+    fn bench() -> Vec<PortInfo> {
+        vec![
+            port("/dev/ttyS0", None, None),
+            port("/dev/ttyACM0", Some((0x0483, 0x5740)), Some("3971345A3130")),
+            port("/dev/ttyACM1", Some((0x0483, 0x5740)), Some("3971345A3131")),
+            port("/dev/ttyUSB0", Some((0x0403, 0x6001)), Some("FT1X2Y3Z")),
+        ]
+    }
+
+    fn auto(vid: Option<u16>, pid: Option<u16>, serial: Option<&str>) -> ConnectionProfile {
+        ConnectionProfile {
+            usb_vid: vid,
+            usb_pid: pid,
+            usb_serial: serial.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn two_identical_boards_need_usb_serial() {
+        let e = select_port(&auto(Some(0x0483), Some(0x5740), None), &bench()).unwrap_err();
+        let m = e.to_string();
+        assert!(m.contains("2 serial ports match USB ID 0483:5740"), "{m}");
+        assert!(
+            m.contains("/dev/ttyACM0 (serial 3971345A3130)")
+                && m.contains("/dev/ttyACM1 (serial 3971345A3131)"),
+            "{m}"
+        );
+        assert!(m.contains("usb_serial"), "{m}");
+        // The serial number picks one board; case does not matter.
+        let p = auto(Some(0x0483), Some(0x5740), Some("3971345a3131"));
+        assert_eq!(select_port(&p, &bench()).unwrap(), "/dev/ttyACM1");
+        // A serial number alone is enough.
+        let p = auto(None, None, Some("FT1X2Y3Z"));
+        assert_eq!(select_port(&p, &bench()).unwrap(), "/dev/ttyUSB0");
+        // A unique VID/PID still works without one.
+        let p = auto(Some(0x0403), Some(0x6001), None);
+        assert_eq!(select_port(&p, &bench()).unwrap(), "/dev/ttyUSB0");
+        // An unknown serial number is reported with what was asked for.
+        let e = select_port(&auto(Some(0x0483), None, Some("nope")), &bench()).unwrap_err();
+        assert!(
+            e.to_string()
+                .contains("no serial port with USB vendor 0483 and serial number nope"),
+            "{e}"
+        );
+        // An explicit port name never looks at the list.
+        let named = ConnectionProfile {
+            port: "COM7".into(),
+            ..auto(Some(0x0483), None, None)
+        };
+        assert_eq!(select_port(&named, &bench()).unwrap(), "COM7");
+    }
+
+    #[test]
+    fn auto_without_filters_takes_the_only_usb_port() {
+        let ports = vec![
+            port("/dev/ttyS0", None, None),
+            port("/dev/ttyACM0", Some((0x2e8a, 0x000a)), None),
+        ];
+        assert_eq!(
+            select_port(&auto(None, None, None), &ports).unwrap(),
+            "/dev/ttyACM0"
+        );
+        // Only legacy ports: the only one is taken, several are an error.
+        let one = vec![port("/dev/ttyS0", None, None)];
+        assert_eq!(
+            select_port(&auto(None, None, None), &one).unwrap(),
+            "/dev/ttyS0"
+        );
+        let e = select_port(&auto(None, None, None), &bench()).unwrap_err();
+        assert!(e.to_string().contains("3 serial ports match"), "{e}");
+        assert_eq!(
+            select_port(&auto(None, None, None), &[])
+                .unwrap_err()
+                .to_string(),
+            "transport: no serial ports found"
+        );
+    }
+
+    #[test]
+    fn identical_boards_without_serial_numbers_must_be_named() {
+        let ports = vec![
+            port("COM3", Some((0x1a86, 0x7523)), None),
+            port("COM4", Some((0x1a86, 0x7523)), None),
+        ];
+        let e = select_port(&auto(Some(0x1a86), Some(0x7523), None), &ports).unwrap_err();
+        let m = e.to_string();
+        assert!(m.contains("COM3 (no serial number), COM4"), "{m}");
+        assert!(m.contains("name the port"), "{m}");
     }
 }

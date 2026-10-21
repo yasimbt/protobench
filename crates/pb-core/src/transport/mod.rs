@@ -17,7 +17,7 @@ use std::time::Duration;
 pub use loopback::{pair as loopback_pair, LoopbackEnd};
 pub use net::{TcpClient, TcpServer, UdpTransport};
 pub use replay::ReplayTransport;
-pub use serial::{list_ports, pulse, resolve_port, PortInfo, SerialTransport};
+pub use serial::{list_ports, pulse, resolve_port, select_port, PortInfo, SerialTransport};
 
 use crate::config::{ConnectionProfile, FramingConfig, TransportKind};
 use crate::error::CoreError;

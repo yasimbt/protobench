@@ -80,15 +80,17 @@ pub fn list_ports(json: bool) -> Result<ExitCode> {
     } else if ports.is_empty() {
         println!("no serial ports found");
     } else {
+        println!(
+            "{:<24} {:<9}  {:<24} DESCRIPTION",
+            "PORT", "USB ID", "SERIAL"
+        );
         for p in ports {
-            let ids = match (p.vid, p.pid) {
-                (Some(v), Some(pid)) => format!("{v:04x}:{pid:04x}"),
-                _ => "----:----".into(),
-            };
             println!(
-                "{:<24} {ids}  {}",
+                "{:<24} {}  {:<24} {}",
                 p.name,
-                p.description.unwrap_or_default()
+                p.usb_id(),
+                p.serial_number.as_deref().unwrap_or("-"),
+                p.description.as_deref().unwrap_or_default()
             );
         }
     }

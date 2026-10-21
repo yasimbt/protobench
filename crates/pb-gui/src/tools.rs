@@ -1064,6 +1064,63 @@ fn transport_label(t: TransportKind) -> &'static str {
     t.as_str()
 }
 
+/// The attached serial ports: pick one by name, or match a USB board by
+/// VID/PID and serial number (`port = "auto"`).
+fn port_menu(ui: &mut egui::Ui, pr: &mut ConnectionProfile) {
+    if ui.button("auto").clicked() {
+        pr.port = "auto".into();
+        ui.close();
+    }
+    let ports = pb_core::transport::list_ports();
+    if ports.is_empty() {
+        ui.weak("no serial ports found");
+    }
+    for port in ports {
+        let mut label = format!("{}  {}", port.name, port.usb_id());
+        if let Some(s) = &port.serial_number {
+            label.push_str(&format!("  #{s}"));
+        }
+        if let Some(d) = &port.description {
+            label.push_str(&format!("  {d}"));
+        }
+        ui.menu_button(label, |ui| {
+            if ui.button(format!("Open {}", port.name)).clicked() {
+                pr.port = port.name.clone();
+                ui.close();
+            }
+            if port.vid.is_some()
+                && ui
+                    .button("Match this board (auto by USB ID and serial number)")
+                    .clicked()
+            {
+                pr.port = "auto".into();
+                pr.usb_vid = port.vid;
+                pr.usb_pid = port.pid;
+                pr.usb_serial = port.serial_number.clone();
+                ui.close();
+            }
+        });
+    }
+}
+
+/// A hex text field for an optional USB ID; empty means "any".
+fn hex_u16_edit(ui: &mut egui::Ui, v: &mut Option<u16>) {
+    let mut text = v.map(|x| format!("{x:04x}")).unwrap_or_default();
+    let r = ui.add(
+        egui::TextEdit::singleline(&mut text)
+            .desired_width(48.0)
+            .hint_text("any"),
+    );
+    if r.changed() {
+        let t = text.trim().trim_start_matches("0x");
+        if t.is_empty() {
+            *v = None;
+        } else if let Ok(x) = u16::from_str_radix(t, 16) {
+            *v = Some(x);
+        }
+    }
+}
+
 /// Project editor body. Returns true if the project was saved and reloaded.
 pub fn project_editor(
     ui: &mut egui::Ui,
@@ -1122,18 +1179,30 @@ pub fn project_editor(
                                     ui.label("port");
                                     ui.horizontal(|ui| {
                                         ui.text_edit_singleline(&mut pr.port);
-                                        ui.menu_button("▾", |ui| {
-                                            if ui.button("auto").clicked() {
-                                                pr.port = "auto".into();
-                                            }
-                                            for port in pb_core::transport::list_ports() {
-                                                if ui.button(&port.name).clicked() {
-                                                    pr.port = port.name.clone();
-                                                }
-                                            }
-                                        });
+                                        ui.menu_button("▾", |ui| port_menu(ui, pr));
                                     });
                                     ui.end_row();
+                                    if pr.port == "auto" {
+                                        ui.label("USB VID / PID (hex)");
+                                        ui.horizontal(|ui| {
+                                            hex_u16_edit(ui, &mut pr.usb_vid);
+                                            hex_u16_edit(ui, &mut pr.usb_pid);
+                                        });
+                                        ui.end_row();
+                                        ui.label("USB serial number");
+                                        let mut serial = pr.usb_serial.clone().unwrap_or_default();
+                                        if ui
+                                            .add(
+                                                egui::TextEdit::singleline(&mut serial)
+                                                    .hint_text("any"),
+                                            )
+                                            .changed()
+                                        {
+                                            pr.usb_serial = (!serial.trim().is_empty())
+                                                .then(|| serial.trim().to_string());
+                                        }
+                                        ui.end_row();
+                                    }
                                     ui.label("baud");
                                     ui.add(
                                         egui::DragValue::new(&mut pr.baud).range(50..=20_000_000),

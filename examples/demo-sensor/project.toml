@@ -13,9 +13,10 @@ profile = "usb"
 [[connection.profiles]]
 name = "usb"
 transport = "serial"                           # serial | tcp_client | tcp_server | udp | sim | replay
-port = "auto"                                  # "auto" = first port matching vid/pid, or a name like COM5 or /dev/ttyACM0
+port = "auto"                                  # "auto" = the one port matching usb_vid/usb_pid/usb_serial, or a name like COM5 or /dev/ttyACM0
 usb_vid = 0x0483                               # optional, for auto-select
 usb_pid = 0x5740
+# usb_serial = "3971345A3130"                  # optional: picks one of several identical boards (see `protobench list-ports`)
 baud = 921600
 data_bits = 8
 parity = "none"

@@ -47,9 +47,10 @@ One of `proto_files` or `descriptor_set` is required. `import "nanopb.proto";` a
 |---|---|---|---|---|
 | `name` | string | `"default"` | all | Profile name (unique). |
 | `transport` | string | `"serial"` | all | `serial`, `tcp_client`, `tcp_server`, `udp`, `sim` or `replay`. |
-| `port` | string | `"auto"` | serial | Port name (`COM5`, `/dev/ttyACM0`) or `"auto"`: the first port matching `usb_vid`/`usb_pid`, or the first port at all when no VID is given. |
+| `port` | string | `"auto"` | serial | Port name (`COM5`, `/dev/ttyACM0`) or `"auto"`: the one port matching `usb_vid`, `usb_pid` and `usb_serial`. Without any of them, the only USB serial port (or the only port, when none is USB). Several matches are an error that lists them. |
 | `usb_vid` | integer | none | serial | USB vendor ID for `port = "auto"`. |
 | `usb_pid` | integer | none | serial | USB product ID for `port = "auto"`. |
+| `usb_serial` | string | none | serial | USB serial number for `port = "auto"` (case-insensitive), to tell identical boards apart. `protobench list-ports` shows it. |
 | `baud` | integer | `115200` | serial | Baud rate. |
 | `data_bits` | integer | `8` | serial | 5–8. |
 | `parity` | string | `"none"` | serial | `none`, `odd`, `even`. |

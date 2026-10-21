@@ -190,12 +190,14 @@ pub struct ConnectionProfile {
     pub name: String,
     /// Transport kind.
     pub transport: TransportKind,
-    /// Serial port name, or `"auto"` to pick by USB VID/PID.
+    /// Serial port name, or `"auto"` to pick by USB VID/PID/serial number.
     pub port: String,
     /// USB vendor ID for `port = "auto"`.
     pub usb_vid: Option<u16>,
     /// USB product ID for `port = "auto"`.
     pub usb_pid: Option<u16>,
+    /// USB serial number for `port = "auto"`: tells identical boards apart.
+    pub usb_serial: Option<String>,
     /// Baud rate.
     pub baud: u32,
     /// 5, 6, 7 or 8.
@@ -238,6 +240,7 @@ impl Default for ConnectionProfile {
             port: "auto".into(),
             usb_vid: None,
             usb_pid: None,
+            usb_serial: None,
             baud: 115_200,
             data_bits: 8,
             parity: Parity::None,

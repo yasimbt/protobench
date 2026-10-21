@@ -44,7 +44,7 @@ A project with errors still opens. The **Problems** panel at the bottom lists ea
 
 Opening happens on the connection's I/O thread; the window stays responsive. With `auto_reconnect` (default), a failed open or a lost link is retried with backoff from 100 ms up to 2 s, so unplugging a USB adapter or resetting the board recovers by itself. The status bar shows the attempt number and the last error.
 
-`port = "auto"` picks the first serial port whose USB vendor/product IDs match `usb_vid`/`usb_pid`.
+`port = "auto"` picks the serial port whose USB vendor ID, product ID and serial number match `usb_vid`, `usb_pid` and `usb_serial` (any of them may be left out). Exactly one port must match: with two identical boards attached, connecting fails with a message that lists both ports and their serial numbers, instead of opening whichever comes first. Add `usb_serial` to the profile to choose one; `protobench list-ports` prints the serial numbers, and in the project editor the port menu's **Match this board** fills in all three. Boards without a USB serial number (many CH340 and CP2102 adapters) cannot be told apart this way: name the port instead. Because the match is redone on every reconnect, an unplugged board comes back on its new port name.
 
 A `tcp_server` profile shows **Waiting for client** until a client connects, and again after it leaves. Commands sent meanwhile fail with "no client connected" and periodic sends pause; requests still waiting when the client leaves fail with "client disconnected". A new client starts with a clean framer, so a half frame from the previous one cannot corrupt its first message.
 
@@ -252,7 +252,7 @@ protobench decode   <file.pbsession> [--json] [--csv out.csv] [--parquet out.par
 protobench sim      --project <dir> [--tcp <port>] [--bind <addr>]
 ```
 
-- `list-ports` prints ports with USB VID:PID and product names.
+- `list-ports` prints ports with USB VID:PID, serial numbers and product names (`--json` for scripts).
 - `schema` prints messages, fields with numbers, types and comments, and enums.
 - `send` sends one command. `--set millivolts=300` overrides payload fields (values in TOML syntax). Without `--wait` it is fire-and-forget; with it, the reply is printed as JSON and the exit code is 1 on timeout or error.
 - `monitor` prints decoded messages and text lines (`--json`: one object per line), or with `--channels` the latest channel values whenever they change. `--send` sends commands after connecting; `--duration` stops after N seconds; `--record` writes a session file. `--foxglove 8765` also serves the session to Foxglove (see *Foxglove server*), on `127.0.0.1` unless `--foxglove-bind 0.0.0.0`. With a `tcp_server` profile, `monitor`, `send` and `run` wait for the client to connect.

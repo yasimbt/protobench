@@ -252,6 +252,12 @@ fn schema_and_list_ports() {
     assert!(!s.contains("google.protobuf"));
     let out = bin().arg("list-ports").output().unwrap();
     assert_eq!(out.status.code(), Some(0));
+    let out = bin().args(["list-ports", "--json"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    for p in v.as_array().unwrap() {
+        assert!(p.get("serial_number").is_some(), "{p}");
+    }
 }
 
 #[test]

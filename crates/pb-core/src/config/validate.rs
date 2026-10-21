@@ -371,6 +371,57 @@ fn validate_profile(p: &ConnectionProfile, i: usize, framing: &FramingConfig, f:
             }
         }
         TransportKind::Sim => {}
+        TransportKind::Mqtt => {
+            if p.broker.trim().is_empty() {
+                f.err(
+                    key_path!["connection", "profiles", i],
+                    "mqtt needs `broker` (host:port)".into(),
+                );
+            }
+            if p.subscribe.is_empty() && p.publish.is_none() {
+                f.err(
+                    key_path!["connection", "profiles", i],
+                    "mqtt needs `subscribe` (topics to receive) and/or `publish` (topic to send to)"
+                        .into(),
+                );
+            }
+            for (j, t) in p.subscribe.iter().enumerate() {
+                if let Some(e) = crate::transport::mqtt::filter_error(t) {
+                    f.err(key_path!["connection", "profiles", i, "subscribe", j], e);
+                }
+            }
+            if let Some(e) = p
+                .publish
+                .as_deref()
+                .and_then(crate::transport::mqtt::topic_error)
+            {
+                f.err(at("publish"), e);
+            }
+            if p.qos > 1 {
+                f.err(
+                    at("qos"),
+                    format!("qos must be 0 or 1 (QoS 2 is not supported), got {}", p.qos),
+                );
+            }
+            if p.tls_cert.is_some() != p.tls_key.is_some() {
+                f.err(
+                    key_path!["connection", "profiles", i],
+                    "mutual TLS needs both `tls_cert` and `tls_key`".into(),
+                );
+            }
+            if (p.tls_ca.is_some() || p.tls_cert.is_some()) && !p.tls {
+                f.warn(
+                    at("tls"),
+                    "tls_ca/tls_cert are set but tls = false; they are ignored".into(),
+                );
+            }
+            if p.password.is_some() && p.password_env.is_some() {
+                f.warn(
+                    at("password"),
+                    "both password and password_env are set; password_env wins".into(),
+                );
+            }
+        }
         TransportKind::Replay => {
             if p.file.as_deref().is_none_or(|x| x.trim().is_empty()) {
                 f.err(
@@ -525,6 +576,12 @@ mod tests {
             }),
             bad(TransportKind::Udp, &|p| p.target = Some("nohost".into())),
             bad(TransportKind::Replay, &|p| p.speed = -1.0),
+            bad(TransportKind::Mqtt, &|p| {
+                p.subscribe = vec!["a/#/b".into()];
+                p.publish = Some("a/+".into());
+                p.qos = 2;
+            }),
+            bad(TransportKind::Mqtt, &|_| {}),
         ];
         let f = profile_findings(&c);
         let has =
@@ -547,6 +604,26 @@ mod tests {
             "{f:#?}"
         );
         assert!(has("connection.profiles[3].speed", ">= 0"), "{f:#?}");
+        assert!(
+            has("connection.profiles[4]", "mqtt needs `broker`"),
+            "{f:#?}"
+        );
+        assert!(
+            has(
+                "connection.profiles[4].subscribe[0]",
+                "`#` must be a whole, last level"
+            ),
+            "{f:#?}"
+        );
+        assert!(
+            has("connection.profiles[4].publish", "cannot contain"),
+            "{f:#?}"
+        );
+        assert!(
+            has("connection.profiles[4].qos", "QoS 2 is not supported"),
+            "{f:#?}"
+        );
+        assert!(has("connection.profiles[5]", "needs `subscribe`"), "{f:#?}");
         // Sim and tcp_server need nothing beyond their defaults.
         c.connection.profiles = vec![
             bad(TransportKind::Sim, &|_| {}),
@@ -584,5 +661,20 @@ mod tests {
         assert!(profile_findings(&c)
             .iter()
             .all(|(k, _, _)| !k.ends_with(".transport")));
+        // A message link with a framer gets the opposite hint.
+        c.connection.profiles.push(ConnectionProfile {
+            name: "broker".into(),
+            transport: TransportKind::Mqtt,
+            broker: "localhost".into(),
+            subscribe: vec!["up".into()],
+            ..Default::default()
+        });
+        let f = profile_findings(&c);
+        assert!(
+            f.iter().any(|(k, e, m)| !e
+                && k == "connection.profiles[2].transport"
+                && m.contains("delivers whole messages")),
+            "{f:#?}"
+        );
     }
 }

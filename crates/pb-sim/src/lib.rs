@@ -8,6 +8,7 @@
 //! ([`run_tcp_server`]).
 
 pub mod generators;
+pub mod mqtt;
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

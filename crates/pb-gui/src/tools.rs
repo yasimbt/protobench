@@ -1111,10 +1111,100 @@ pub struct ProjectEditorState {
     framing: Option<FramingConfig>,
     sync_text: String,
     status: Option<String>,
+    /// Profiles whose section is open (by index).
+    open: Vec<usize>,
+}
+
+impl ProjectEditorState {
+    /// Adds an unsaved profile to the working copy and opens its section.
+    pub fn add_profile(&mut self, state: &AppState, p: ConnectionProfile) {
+        if self.profiles.is_none() {
+            if let Some(pr) = &state.project {
+                self.profiles = Some(pr.config.connection.profiles.clone());
+                self.framing = Some(pr.config.framing.clone());
+                self.sync_text = pb_core::util::hex(&pr.config.framing.sync_word);
+            }
+        }
+        let list = self.profiles.get_or_insert_with(Vec::new);
+        list.push(p);
+        self.open.push(list.len() - 1);
+    }
+
+    /// Profiles in the working copy.
+    pub fn profiles(&self) -> &[ConnectionProfile] {
+        self.profiles.as_deref().unwrap_or_default()
+    }
 }
 
 fn transport_label(t: TransportKind) -> &'static str {
     t.as_str()
+}
+
+/// A text field for an optional string; empty means None.
+fn opt_text(ui: &mut egui::Ui, v: &mut Option<String>, hint: &str) {
+    let mut t = v.clone().unwrap_or_default();
+    if ui
+        .add(egui::TextEdit::singleline(&mut t).hint_text(hint))
+        .changed()
+    {
+        *v = (!t.trim().is_empty()).then(|| t.trim().to_string());
+    }
+}
+
+/// Grid rows of an MQTT profile.
+fn mqtt_fields(ui: &mut egui::Ui, pr: &mut ConnectionProfile, i: usize) {
+    ui.label("broker");
+    ui.add(egui::TextEdit::singleline(&mut pr.broker).hint_text("host:port"));
+    ui.end_row();
+    ui.label("subscribe");
+    let mut subs = pr.subscribe.join(", ");
+    if ui
+        .add(egui::TextEdit::singleline(&mut subs).hint_text("dev/+/up, log/#"))
+        .changed()
+    {
+        pr.subscribe = subs
+            .split(',')
+            .map(str::trim)
+            .filter(|x| !x.is_empty())
+            .map(str::to_string)
+            .collect();
+    }
+    ui.end_row();
+    ui.label("publish");
+    opt_text(ui, &mut pr.publish, "dev/1/down");
+    ui.end_row();
+    ui.label("QoS");
+    ui.horizontal(|ui| {
+        ui.radio_value(&mut pr.qos, 0, "0");
+        ui.radio_value(&mut pr.qos, 1, "1");
+    });
+    ui.end_row();
+    ui.label("client id");
+    ui.add(egui::TextEdit::singleline(&mut pr.client_id).hint_text("(generated)"));
+    ui.end_row();
+    ui.label("user / password env");
+    ui.horizontal(|ui| {
+        opt_text(ui, &mut pr.username, "user");
+        opt_text(ui, &mut pr.password_env, "MQTT_PASSWORD");
+    });
+    ui.end_row();
+    ui.label("keep-alive s");
+    ui.add(egui::DragValue::new(&mut pr.keep_alive_s).range(0..=3600));
+    ui.end_row();
+    ui.label("TLS");
+    ui.checkbox(&mut pr.tls, "");
+    ui.end_row();
+    if pr.tls {
+        ui.label("CA / cert / key (PEM)");
+        ui.push_id(("tlsfiles", i), |ui| {
+            ui.horizontal(|ui| {
+                opt_text(ui, &mut pr.tls_ca, "ca.pem");
+                opt_text(ui, &mut pr.tls_cert, "client.pem");
+                opt_text(ui, &mut pr.tls_key, "client.key");
+            });
+        });
+        ui.end_row();
+    }
 }
 
 /// A warning when the framing does not suit the link (the same rule as
@@ -1222,6 +1312,7 @@ pub fn project_editor(
             for (i, pr) in profiles.iter_mut().enumerate() {
                 egui::CollapsingHeader::new(format!("{} ({})", pr.name, pr.transport.as_str()))
                     .id_salt(("prof", i))
+                    .open(es.open.contains(&i).then_some(true))
                     .show(ui, |ui| {
                         egui::Grid::new(("profgrid", i)).show(ui, |ui| {
                             ui.label("name");
@@ -1369,6 +1460,7 @@ pub fn project_editor(
                                     ui.end_row();
                                 }
                                 TransportKind::Sim => {}
+                                TransportKind::Mqtt => mqtt_fields(ui, pr, i),
                             }
                             ui.label("auto reconnect");
                             ui.checkbox(&mut pr.auto_reconnect, "");

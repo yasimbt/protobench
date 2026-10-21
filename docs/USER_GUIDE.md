@@ -50,6 +50,32 @@ A `tcp_server` profile shows **Waiting for client** until a client connects, and
 
 Writes give up after 1 s. A TCP peer that stops reading for that long counts as a lost link (and reconnects with `auto_reconnect`); a serial port that cannot take the data in time (flow control held, device stalled) fails only that command.
 
+### MQTT
+
+Devices that talk through a broker (Wi-Fi or cellular sensors, a gateway) use an `mqtt` profile:
+
+```toml
+[[connection.profiles]]
+name = "cloud"
+transport = "mqtt"
+broker = "broker.example.com:8883"
+tls = true
+username = "bench"
+password_env = "MQTT_PASSWORD"     # read from the environment, not the file
+subscribe = ["sensors/1234/up"]    # what the device publishes
+publish = "sensors/1234/down"      # where commands go
+qos = 1
+
+[framing]
+type = "none"                      # one MQTT message = one frame
+```
+
+ProtoBench is an ordinary MQTT 3.1.1 client: every message on a `subscribe` filter is decoded as one frame, and every command is published to `publish`. With `qos = 1` it keeps a persistent session, so the broker holds messages while the link is down, and commands that were not acknowledged are sent again after a reconnect (they may arrive twice; a sequence-ID field lets the firmware notice). The keep-alive ping notices a dead broker within about one and a half keep-alive intervals.
+
+TLS checks the broker's certificate against the operating system's root store; `tls_ca` adds a private CA, and `tls_cert`/`tls_key` give a client certificate for brokers that require one. `protobench check` reports a missing broker, invalid topic filters, a publish topic with wildcards and QoS 2.
+
+`protobench sim --project . --mqtt localhost:1883` runs the project's simulator as an MQTT device on a broker: it subscribes to the first mqtt profile's `publish` topic and publishes to its first `subscribe` filter (with `+`/`#` replaced by `sim`), so `run --profile cloud --port localhost:1883` works end to end without hardware. `--profile` picks another mqtt profile. A local broker is a one-liner, e.g. `mosquitto -p 1883`; ProtoBench's own tests use a small built-in broker.
+
 ## Multiple devices
 
 A project can connect several different devices at once: the board under test plus a reference meter, a power supply with a protobuf interface, or a second board. Each device is a project folder of its own (its own `.proto`, framing, commands, telemetry and simulator), and the main project lists the others:
@@ -281,7 +307,7 @@ protobench run      --project <dir> --sequence <name> [--profile [<device>=]<nam
 protobench check    --project <dir> [--json]
 protobench decode   <file.pbsession> [--json] [--csv out.csv] [--parquet out.parquet] [--mcap out.mcap]
                     [--channels a,b] [--range <t0>:<t1>] [--per-channel]
-protobench sim      --project <dir> [--tcp <port>] [--bind <addr>]
+protobench sim      --project <dir> [--tcp <port>] [--bind <addr>] | [--mqtt <broker> [--profile <name>]]
 ```
 
 - `list-ports` prints ports with USB VID:PID, serial numbers and product names (`--json` for scripts).
@@ -291,7 +317,7 @@ protobench sim      --project <dir> [--tcp <port>] [--bind <addr>]
 - `run` runs a sequence headlessly and writes `<sequence>_<timestamp>.json` and `.xml` to `--report-dir` (default `<project>/reports`). Exit codes: **0** all steps passed, **1** a step failed, **2** configuration or connection error. `--non-interactive` decides what `prompt_operator` does (default: the sequence's `non_interactive`, else `fail`). `--port` overrides the profile's port, so the same sequence runs on any test station: `protobench run --project . --sequence smoke --profile usb --port COM5`. `--var load_ohms=4700` sets a variable, overriding `[vars]` (repeatable; values in TOML syntax like `send --set`, so `--var name='"abc"'` is a string and a value that is not valid TOML is taken as a string). It also answers `prompt_operator` inputs with the same `var`, so a sequence that asks for measured values runs unattended.
 - `check` checks a project without connecting: `project.toml`, the schema, every sequence (commands, messages, assertion and `save` paths, channels, statistics, scripts that do not compile, `${vars}` nothing defines) and the channels in `layout.json`. Findings print as `file:line: error|warning: message`; the exit code is **1** if there is any error, **0** otherwise, so it fits a CI step.
 - `decode` prints a recording (`--json`: one object per record), or exports its channels to CSV or Parquet and its messages to MCAP. `--channels` limits the export to some channels, `--range 12.5:20` to a time window in seconds (either side may be empty), and `--per-channel` writes one CSV per channel.
-- `sim` runs the project's simulator as a TCP server (default port 9000). Point a `tcp_client` profile at it to test the real network path.
+- `sim` runs the project's simulator as a TCP server (default port 9000). Point a `tcp_client` profile at it to test the real network path. With `--mqtt <broker>` it acts as an MQTT device instead (see *MQTT*).
 
 With `[[devices]]` (see *Multiple devices*), `monitor` and `run` start every device; `--only main` (comma-separated names) starts only some. `--profile` and `--port` take `DEVICE=VALUE` for another device and a bare value for `main`: `protobench run --project . --sequence compare --profile usb --profile ref=usb --port ref=COM7`. `send --device ref` connects only that device, and there a bare `--profile`/`--port` is the target's own. `monitor` tags other devices' output (`ref:reading`, and `"device": "ref"` in JSON) and `--send "ref:Start Stream"` sends to one of them.
 

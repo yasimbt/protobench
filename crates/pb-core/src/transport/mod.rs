@@ -5,6 +5,7 @@
 //! MQTT) plug in by implementing the trait and adding a [`connector`] arm.
 
 mod loopback;
+pub mod mqtt;
 mod net;
 pub mod replay;
 mod serial;
@@ -136,6 +137,7 @@ pub fn connector_for(
             }
             TransportKind::Udp => p.target = Some(o),
             TransportKind::Replay => p.file = Some(o),
+            TransportKind::Mqtt => p.broker = o,
             TransportKind::Sim => {}
         }
     }
@@ -164,6 +166,7 @@ pub fn connector_for(
             })?;
             Box::new(move || f())
         }
+        TransportKind::Mqtt => mqtt::connector(&p, project_dir)?,
         TransportKind::Replay => {
             let file = p
                 .file

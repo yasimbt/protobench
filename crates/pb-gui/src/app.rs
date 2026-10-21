@@ -64,7 +64,8 @@ pub struct ProtoBenchApp {
     schema_browser: SchemaBrowserState,
     /// Sequence runner.
     pub runner: RunnerState,
-    editor: ProjectEditorState,
+    /// Project editor.
+    pub editor: ProjectEditorState,
     actions: Vec<Action>,
     saved_layout: String,
     last_layout_check: Instant,

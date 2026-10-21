@@ -744,3 +744,58 @@ fn round3_recording_decodes() {
     );
     let _ = std::fs::remove_dir_all(d);
 }
+
+#[test]
+fn sim_and_run_over_mqtt() {
+    let broker = pb_sim::mqtt::MiniBroker::start().unwrap();
+    let addr = broker.addr().to_string();
+    let root = tmp("mqtt");
+    let dir = copy_demo(&root);
+    // One message per PUBLISH, and an mqtt profile.
+    let cfg = dir.join("project.toml");
+    let text = std::fs::read_to_string(&cfg)
+        .unwrap()
+        .replace("type = \"cobs\"", "type = \"none\"")
+        .replace("text_passthrough = true", "text_passthrough = false")
+        .replace(
+            "# ---------- other devices on the bench ----------",
+            "[[connection.profiles]]\nname = \"mqtt\"\ntransport = \"mqtt\"\nbroker = \"127.0.0.1:1\"\nsubscribe = [\"bench/+/up\"]\npublish = \"bench/sim/down\"\nqos = 1\n\n# ---------- other devices on the bench ----------",
+        );
+    std::fs::write(&cfg, text).unwrap();
+    let mut sim = bin()
+        .args(["sim", "--project"])
+        .arg(&dir)
+        .args(["--mqtt", &addr])
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    // The simulator is up once the broker has its connection.
+    let t0 = std::time::Instant::now();
+    while broker.connections() == 0 {
+        assert!(t0.elapsed().as_secs() < 10, "simulator did not connect");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let out = bin()
+        .args(["run", "--project"])
+        .arg(&dir)
+        .args([
+            "--sequence",
+            "smoke",
+            "--profile",
+            "mqtt",
+            "--port",
+            &addr,
+            "--only",
+            "main",
+            "--report-dir",
+        ])
+        .arg(root.join("r"))
+        .output()
+        .unwrap();
+    let _ = sim.kill();
+    let _ = sim.wait();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert!(err.contains("mqtt://"), "{err}");
+    let _ = std::fs::remove_dir_all(root);
+}

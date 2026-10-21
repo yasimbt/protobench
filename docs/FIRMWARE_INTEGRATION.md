@@ -51,6 +51,10 @@ A length of 0 or above `max_frame_len + len(crc)` is a framing error. On a frami
 
 Every transport read is one frame: one UDP datagram, for example. The CRC, if configured, is still appended and checked.
 
+### Message links (MQTT)
+
+On a link that carries whole messages, such as MQTT, set `type = "none"`: the MQTT payload is exactly what goes between the delimiters on a serial line, the codec bytes plus the optional CRC, with no COBS, SLIP or length prefix. The firmware publishes one encoded message per MQTT PUBLISH to the topic ProtoBench subscribes to, and decodes each PUBLISH it receives on the command topic as one message.
+
 ### Text passthrough
 
 With `text_passthrough = true`, firmware can print log lines on the same UART as the frames. A line is the bytes before a `\n` that start with a printable character (0x21–0x7E) and contain only printable ASCII, tab or CR. It goes to the text console instead of the framer. Rules:

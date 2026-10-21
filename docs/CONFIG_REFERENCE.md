@@ -46,7 +46,7 @@ One of `proto_files` or `descriptor_set` is required. `import "nanopb.proto";` a
 | Key | Type | Default | Used by | Meaning |
 |---|---|---|---|---|
 | `name` | string | `"default"` | all | Profile name (unique). |
-| `transport` | string | `"serial"` | all | `serial`, `tcp_client`, `tcp_server`, `udp`, `sim` or `replay`. |
+| `transport` | string | `"serial"` | all | `serial`, `tcp_client`, `tcp_server`, `udp`, `sim`, `replay` or `mqtt`. |
 | `port` | string | `"auto"` | serial | Port name (`COM5`, `/dev/ttyACM0`) or `"auto"`: the one port matching `usb_vid`, `usb_pid` and `usb_serial`. Without any of them, the only USB serial port (or the only port, when none is USB). Several matches are an error that lists them. |
 | `usb_vid` | integer | none | serial | USB vendor ID for `port = "auto"`. |
 | `usb_pid` | integer | none | serial | USB product ID for `port = "auto"`. |
@@ -67,8 +67,20 @@ One of `proto_files` or `descriptor_set` is required. `import "nanopb.proto";` a
 | `target` | string | none | udp | Destination `host:port`. Without it, replies go to the sender of the last datagram. |
 | `file` | string | none | replay | Recording to play back (relative to the project). |
 | `speed` | float | `1.0` | replay | 1.0 = real time, 2.0 = twice as fast, 0 = as fast as possible. |
+| `broker` | string | required | mqtt | Broker `host:port`; the port defaults to 1883, or 8883 with `tls`. |
+| `subscribe` | array of strings | `[]` | mqtt | Topic filters to receive from (`+` one level, `#` the rest). Every message on them is one frame. |
+| `publish` | string | none | mqtt | Topic every sent frame is published to. Without it the profile only receives. |
+| `qos` | integer | `0` | mqtt | 0 or 1, for publishing and subscribing. With 1 the session is persistent (the broker queues messages while the link is down) and unacknowledged messages are sent again after a reconnect. QoS 2 is not supported. |
+| `client_id` | string | generated | mqtt | Client id. Empty picks `protobench-<random>` once per run. Two clients with the same id push each other off the broker. |
+| `username` | string | none | mqtt | User name. |
+| `password_env` | string | none | mqtt | Environment variable that holds the password, so it stays out of the project. |
+| `password` | string | none | mqtt | The password itself (`password_env` wins if both are set). |
+| `keep_alive_s` | integer | `30` | mqtt | Keep-alive in seconds; 0 turns it off. An unanswered ping counts as a lost link. |
+| `tls` | bool | `false` | mqtt | TLS, verified against the operating system's root certificates. |
+| `tls_ca` | string | none | mqtt | Extra CA certificate(s) to trust, PEM, relative to the project (a private broker). |
+| `tls_cert`, `tls_key` | string | none | mqtt | Client certificate and key, PEM, for brokers that require mutual TLS (AWS IoT, for example). |
 
-The `sim` transport runs the built-in simulator in-process. A `tcp_server` serves one client at a time and goes back to listening when it disconnects.
+The `sim` transport runs the built-in simulator in-process. A `tcp_server` serves one client at a time and goes back to listening when it disconnects. An `mqtt` profile usually goes with `framing.type = "none"`, since every MQTT message is already one frame (a CRC is still possible).
 
 ### `[framing]`
 

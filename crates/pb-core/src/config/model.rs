@@ -171,6 +171,8 @@ pub enum TransportKind {
     Sim,
     /// Plays back a `.pbsession` recording.
     Replay,
+    /// MQTT 3.1.1 through a broker: one message per PUBLISH.
+    Mqtt,
 }
 
 /// How a transport delivers data, which decides the framing that suits it.
@@ -193,6 +195,7 @@ impl TransportKind {
         TransportKind::Udp,
         TransportKind::Sim,
         TransportKind::Replay,
+        TransportKind::Mqtt,
     ];
 
     /// The name used in `project.toml`.
@@ -204,6 +207,7 @@ impl TransportKind {
             TransportKind::Udp => "udp",
             TransportKind::Sim => "sim",
             TransportKind::Replay => "replay",
+            TransportKind::Mqtt => "mqtt",
         }
     }
 
@@ -214,6 +218,7 @@ impl TransportKind {
                 LinkKind::Stream
             }
             TransportKind::Udp | TransportKind::Sim | TransportKind::Replay => LinkKind::Either,
+            TransportKind::Mqtt => LinkKind::Message,
         }
     }
 }
@@ -303,6 +308,32 @@ pub struct ConnectionProfile {
     pub file: Option<String>,
     /// Replay speed: 1.0 = real time, 0 = as fast as possible.
     pub speed: f64,
+    /// MQTT broker `host:port` (port 1883, or 8883 with TLS, if omitted).
+    pub broker: String,
+    /// MQTT client id; empty picks `protobench-<random>` once per run.
+    pub client_id: String,
+    /// MQTT user name.
+    pub username: Option<String>,
+    /// MQTT password (prefer `password_env`, which keeps it out of the file).
+    pub password: Option<String>,
+    /// Environment variable that holds the MQTT password.
+    pub password_env: Option<String>,
+    /// TLS for MQTT, verified against the OS root store (and `tls_ca`).
+    pub tls: bool,
+    /// Extra CA certificate(s) to trust, PEM, relative to the project.
+    pub tls_ca: Option<String>,
+    /// Client certificate chain for mutual TLS, PEM, relative to the project.
+    pub tls_cert: Option<String>,
+    /// Private key of `tls_cert`, PEM, relative to the project.
+    pub tls_key: Option<String>,
+    /// MQTT keep-alive in seconds (0 = off).
+    pub keep_alive_s: u16,
+    /// MQTT topic filters to receive messages from (`+` and `#` allowed).
+    pub subscribe: Vec<String>,
+    /// MQTT topic that sent messages are published to.
+    pub publish: Option<String>,
+    /// MQTT QoS for publishing and subscribing: 0 or 1.
+    pub qos: u8,
 }
 
 impl Default for ConnectionProfile {
@@ -330,6 +361,19 @@ impl Default for ConnectionProfile {
             target: None,
             file: None,
             speed: 1.0,
+            broker: String::new(),
+            client_id: String::new(),
+            username: None,
+            password: None,
+            password_env: None,
+            tls: false,
+            tls_ca: None,
+            tls_cert: None,
+            tls_key: None,
+            keep_alive_s: 30,
+            subscribe: Vec::new(),
+            publish: None,
+            qos: 0,
         }
     }
 }
@@ -354,6 +398,15 @@ impl ConnectionProfile {
             TransportKind::Replay => {
                 format!("replay {}", self.file.as_deref().unwrap_or("(no file)"))
             }
+            TransportKind::Mqtt => format!(
+                "mqtt{}://{}",
+                if self.tls { "s" } else { "" },
+                if self.broker.is_empty() {
+                    "(no broker)"
+                } else {
+                    &self.broker
+                }
+            ),
         }
     }
 }

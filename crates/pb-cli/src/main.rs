@@ -179,7 +179,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Run the device simulator as a TCP server.
+    /// Run the device simulator as a TCP server, or as an MQTT device.
     Sim {
         /// Project folder.
         #[arg(long)]
@@ -190,6 +190,13 @@ enum Command {
         /// Address to bind.
         #[arg(long, default_value = "0.0.0.0")]
         bind: String,
+        /// Act as an MQTT device on this broker (`host:port`) instead,
+        /// with the topics of an mqtt profile swapped round.
+        #[arg(long, value_name = "BROKER")]
+        mqtt: Option<String>,
+        /// The mqtt profile whose topics to use (default: the first one).
+        #[arg(long)]
+        profile: Option<String>,
     },
 }
 
@@ -292,7 +299,16 @@ fn main() -> ExitCode {
             per_channel,
         }),
         Command::Check { project, json } => cmd_check::check(&project, json),
-        Command::Sim { project, tcp, bind } => cmd::sim(&project, &bind, tcp),
+        Command::Sim {
+            project,
+            tcp,
+            bind,
+            mqtt,
+            profile,
+        } => match mqtt {
+            Some(broker) => cmd::sim_mqtt(&project, &broker, profile.as_deref()),
+            None => cmd::sim(&project, &bind, tcp),
+        },
     };
     match r {
         Ok(code) => code,

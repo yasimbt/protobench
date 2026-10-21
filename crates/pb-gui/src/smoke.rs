@@ -61,6 +61,8 @@ enum Step {
     WaitCompare,
     ExportBoth,
     WaitExport,
+    Editor,
+    WaitEditor,
     Render,
     Done,
 }
@@ -378,7 +380,40 @@ impl Script {
                     "CSV export of both devices: {} rows ({header})",
                     text.lines().count() - 1
                 ));
-                self.step = Step::Render;
+                self.step = Step::Editor;
+            }
+            Step::Editor => {
+                // Tools > Project editor with new links' profiles open (not
+                // saved), so their fields render.
+                app.windows.editor = true;
+                for p in link_profiles() {
+                    app.editor.add_profile(&app.state, p);
+                }
+                self.frames_in_dialog = 0;
+                self.step = Step::WaitEditor;
+            }
+            Step::WaitEditor => {
+                self.frames_in_dialog += 1;
+                if self.frames_in_dialog >= 5 {
+                    let kinds: Vec<&str> = app
+                        .editor
+                        .profiles()
+                        .iter()
+                        .map(|p| p.transport.as_str())
+                        .collect();
+                    for want in link_profiles() {
+                        if !kinds.contains(&want.transport.as_str()) {
+                            return self.fail(format!("profile editor lost {}", want.name));
+                        }
+                    }
+                    self.log.push(format!(
+                        "project editor rendered {} profiles ({})",
+                        kinds.len(),
+                        kinds.join(", ")
+                    ));
+                    app.windows.editor = false;
+                    self.step = Step::Render;
+                }
             }
             Step::Render => {
                 if self.frames_in_render == 0 {
@@ -400,6 +435,20 @@ impl Script {
             Step::Done => {}
         }
     }
+}
+
+/// Profiles of the newer links, opened in the project editor.
+fn link_profiles() -> Vec<pb_core::config::ConnectionProfile> {
+    use pb_core::config::{ConnectionProfile, TransportKind};
+    vec![ConnectionProfile {
+        name: "broker".into(),
+        transport: TransportKind::Mqtt,
+        broker: "localhost:1883".into(),
+        subscribe: vec!["dev/+/up".into()],
+        publish: Some("dev/1/down".into()),
+        tls: true,
+        ..Default::default()
+    }]
 }
 
 fn smoke_csv_path() -> PathBuf {

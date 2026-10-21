@@ -579,3 +579,20 @@ pub fn sim(dir: &Path, bind: &str, port: u16) -> Result<ExitCode> {
     .with_context(|| format!("simulator on {bind}:{port}"))?;
     Ok(ExitCode::SUCCESS)
 }
+
+pub fn sim_mqtt(dir: &Path, broker: &str, profile: Option<&str>) -> Result<ExitCode> {
+    let p = open_project(dir)?;
+    let host = pb_sim::mqtt::mqtt_profile(&p, profile)?;
+    let dev = pb_sim::mqtt::device_profile(&host);
+    let stop = Arc::new(AtomicBool::new(false));
+    let t = pb_sim::mqtt::spawn_mqtt_device(&p, &host, broker, stop)
+        .with_context(|| format!("simulator on mqtt://{broker}"))?;
+    eprintln!(
+        "simulator for `{}` on mqtt://{broker}: receives {}, publishes to {} (Ctrl-C to stop)",
+        p.config.name,
+        dev.subscribe.join(", "),
+        dev.publish.as_deref().unwrap_or("-")
+    );
+    let _ = t.join();
+    Ok(ExitCode::SUCCESS)
+}

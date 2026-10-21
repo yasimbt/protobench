@@ -20,12 +20,18 @@ ProtoBench is a desktop and command-line tool for developing and testing embedde
 Rust stable (1.95 or newer) and a C linker:
 
 ```sh
-cargo build --workspace --release
+cargo build --release
 ```
 
-Parquet export is a default cargo feature of `pb-core` (`parquet`); build with `--no-default-features` on `pb-core` to leave it out and save compile time.
-
 This produces `target/release/protobench` (CLI) and `target/release/protobench-gui` (GUI).
+
+Cargo features:
+
+- `parquet` (default, `pb-core`): Parquet export. `--no-default-features` on `pb-core` leaves it out and saves compile time.
+- `rtt` (default in the CLI and GUI): SEGGER RTT through debug probes (probe-rs).
+- `ble` (off): Bluetooth LE. `cargo build --release -p pb-cli -p pb-gui --features ble`; on Linux it needs `libdbus-1-dev` and `pkg-config` to build and BlueZ to run.
+
+The Python module is a separate crate, built with maturin (`pip install maturin && maturin develop --release -m crates/pb-py/Cargo.toml`); `cargo build --workspace` builds it too, which needs a Python 3 interpreter on the PATH.
 
 On Linux the GUI loads OpenGL, Wayland/X11 and xkbcommon at runtime; distributions ship these with any desktop. On NixOS, build inside a shell with a C compiler (e.g. `nix shell nixpkgs#gcc`) and run the GUI with those libraries on `LD_LIBRARY_PATH`, for example from a shell with `libGL`, `wayland`, `libxkbcommon` and `libX11`. Serial ports are enumerated without libudev; USB IDs come from sysfs.
 
@@ -94,22 +100,30 @@ crates/pb-core   all logic (config, schema, framing, codec, transports, session,
 crates/pb-sim    device simulator (library; used by the CLI, GUI and tests)
 crates/pb-cli    `protobench` command-line tool
 crates/pb-gui    `protobench-gui` desktop app (eframe/egui)
+crates/pb-py     `protobench` Python module (PyO3, maturin)
 assets/proto     bundled nanopb.proto stub
-examples         demo-sensor project
+examples         demo-sensor project, and demo-reference (its second device)
 docs             documentation
 ```
 
 ## Tests
 
 ```sh
-cargo test --workspace
+cargo test --workspace            # includes the Python module's test (needs python3)
 cargo clippy --workspace --all-targets -- -D warnings
 # 5 kHz for 10 s through the simulator loopback (ignored by default)
 cargo test --release -p pb-sim --test loopback performance -- --ignored --nocapture
-# GUI: drives the command buttons and composer against the simulator while rendering frames
+# MQTT against a real Mosquitto (ignored by default; mosquitto on PATH)
+cargo test -p pb-sim --test mqtt -- --ignored
+# CAN over SocketCAN (ignored by default; needs a vcan0 interface)
+cargo test -p pb-core socketcan -- --ignored
+# GUI: drives the command buttons, both demo devices, the composer and the
+# project editor against the simulators while rendering frames
 target/release/protobench-gui --smoke-test            # headless rendering
 target/release/protobench-gui --smoke-test --window   # also in a real window
 ```
+
+Everything else runs without hardware: MQTT through a broker built into the tests, CAN through an emulated slcan adapter, RTT through a mock probe. `PROTOBENCH_BUILD_PROMPT.md` (Part D, D6) lists the checks to run on real hardware.
 
 ## License
 

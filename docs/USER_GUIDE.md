@@ -38,7 +38,7 @@ A project with errors still opens. The **Problems** panel at the bottom lists ea
 **Connection menu**
 
 - Pick a profile; the list shows each profile's endpoint (`/dev/ttyACM0 @ 921600`, `tcp://192.168.1.50:9000`, `simulator (loopback)`).
-- **Port override** replaces the profile's serial port, or `host:port` for TCP/UDP, without editing the file.
+- **Port override** replaces the profile's serial port, or `host:port` for TCP/UDP, without editing the file. For the newer links it replaces the MQTT broker, the CAN adapter's port (or SocketCAN interface), the RTT probe selector and the BLE address.
 - **Connect** / **Disconnect**.
 - **DTR** / **RTS** on and off, and **Pulse reset**, which toggles the profile's `reset_line` away from its idle level for `reset_pulse_ms`. Use it to reset a target or enter a bootloader without unplugging.
 
@@ -93,6 +93,8 @@ rtt_text_channel = 0             # printf → text console
 ```
 
 The data channel is a byte stream like a UART, so keep the project's framing (COBS, SLIP, a length prefix). `rtt_text_channel` puts a second channel, usually the default `printf` channel 0, into the text console, so logs and data no longer share a wire. `protobench list-probes` (and the ▾ menu next to **probe** in the project editor) lists attached probes. If the probe is unplugged or the target is power-cycled, the connection reconnects like a serial port. `attach = false` resets the target while attaching.
+
+Wiring: the probe's SWDIO, SWCLK and GND to the board, VTref to the board's supply so the probe matches its logic level, and nRESET if you use `attach = false`. Firmware: SEGGER RTT (or `rtt-target` in Rust) with a buffer for the protobuf stream; `FIRMWARE_INTEGRATION.md` shows the setup.
 
 On Linux the probe needs USB access (a udev rule, as for any probe-rs tool); on Windows, J-Link and ST-Link work with their usual drivers and CMSIS-DAP v2 probes with WinUSB. Under WSL2, attach the probe with `usbipd`.
 
@@ -453,3 +455,14 @@ This lets you build dashboards and sequences before hardware exists, and test ho
 | A `tcp_server` profile stays at "Waiting for client" | Nothing has connected to the port yet; check the device's target address and the firewall. |
 | Foxglove connects but shows no data | Pick a topic in a panel (Foxglove subscribes per panel), and start the stream. From another machine, bind `0.0.0.0`. |
 | GUI does not start on Linux | The OpenGL, Wayland or X11 libraries are not on the library path (see README). |
+| "2 serial ports match USB ID …" | Two identical boards are attached: set `usb_serial` to the one you want (`protobench list-ports` shows the numbers), or name the port. |
+| A run stops with "device `ref` is not connected" | A step names a device that is not running: connect it (`--profile ref=…`, the status-bar indicator, **Connect all**), or do not start it with `--only`. |
+| Channels of another device are missing | They are named `<device>.<channel>`, e.g. `ref.reading.vout_mv`; in a capture with `device = "ref"` use the device's own name. |
+| MQTT: "broker refused the connection: bad user name or password" | Wrong `username`, or `password_env` names a variable that holds the wrong password. |
+| MQTT: connected but nothing arrives | The `subscribe` filter does not match the device's topic, or the framing is not `none` (`check` warns). |
+| CAN: "no answer to `S6`" | The port is not an slcan adapter (candleLight firmware speaks gs_usb, use SocketCAN), or the adapter needs a different baud on its serial port. |
+| CAN: "no flow control within 1s" | The device does not answer first frames: wrong `rx_id`/`tx_id` pair, the bit rate is wrong, the bus is not terminated, or the firmware expects `isotp_padding`. |
+| RTT: "no RTT control block found" | RTT is not linked into the firmware, the core is halted, or `chip` is wrong; with large RAM set `elf` so the address is known. |
+| RTT: "no up channel 1" | The firmware did not configure that buffer; the message lists the channels it has. |
+| BLE: "cannot reach the Bluetooth stack" | BlueZ is not running (Linux), or there is no Bluetooth adapter (WSL needs one attached with `usbipd`). |
+| BLE: "no device … within 10s" | The device is not advertising the service UUID, the name differs, or it is still connected to a phone. `protobench ble-scan` shows what is in range. |

@@ -82,7 +82,7 @@ unsigned link_poll(uint8_t *buf, unsigned size) {      /* feed the result to the
 
 ### Bluetooth LE (Nordic UART Service)
 
-Over BLE the firmware sends the same framed bytes it would send on a UART as notifications on the NUS TX characteristic (Zephyr's `bt_nus_send`, nRF5 SDK's `ble_nus_data_send`), in pieces of at most MTU − 3 bytes, and receives commands as writes on the NUS RX characteristic. Frames may be split across notifications and several may share one; the framer reassembles them, so keep COBS (or another framer) on this link.
+The Nordic UART Service is service `6e400001-b5a3-f393-e0a9-e50e24dcca9e`, with RX `6e400002-…` (the host writes here) and TX `6e400003-…` (the device notifies here); `service`, `rx_char` and `tx_char` in the profile name other UUIDs for a custom service. Over BLE the firmware sends the same framed bytes it would send on a UART as notifications on the NUS TX characteristic (Zephyr's `bt_nus_send`, nRF5 SDK's `ble_nus_data_send`), in pieces of at most MTU − 3 bytes, and receives commands as writes on the NUS RX characteristic. Frames may be split across notifications and several may share one; the framer reassembles them, so keep COBS (or another framer) on this link.
 
 ### CAN with ISO-TP
 

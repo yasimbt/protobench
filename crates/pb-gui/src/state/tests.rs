@@ -371,3 +371,42 @@ fn second_device_connects_tags_its_traffic_and_records_with_main() {
     assert!(!s.running());
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn editing_a_device_project_offers_a_reload() {
+    fn copy_tree(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for e in std::fs::read_dir(from).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                copy_tree(&p, &to.join(e.file_name()));
+            } else {
+                std::fs::copy(&p, to.join(e.file_name())).unwrap();
+            }
+        }
+    }
+    let root = std::env::temp_dir().join(format!("pb-gui-watch-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    copy_tree(&demo_dir(), &root.join("demo-sensor"));
+    copy_tree(
+        &demo_dir().parent().unwrap().join("demo-reference"),
+        &root.join("demo-reference"),
+    );
+    let mut s = AppState::default();
+    s.open_project(&root.join("demo-sensor"));
+    assert!(s.diagnostics.is_empty(), "{:?}", s.diagnostics);
+    // The reference meter's project changes on disk.
+    let f = std::fs::File::options()
+        .write(true)
+        .open(root.join("demo-reference/project.toml"))
+        .unwrap();
+    f.set_modified(SystemTime::now() + Duration::from_secs(5))
+        .unwrap();
+    s.check_files();
+    assert!(
+        matches!(&s.dialog, Some(Dialog::Reload { what }) if what.contains("project.toml")),
+        "{:?}",
+        s.dialog
+    );
+    let _ = std::fs::remove_dir_all(root);
+}

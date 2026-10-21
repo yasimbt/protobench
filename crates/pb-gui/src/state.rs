@@ -240,14 +240,22 @@ struct Watcher {
 }
 
 impl Watcher {
+    /// Watches the project's config and schema files, and those of every
+    /// `[[devices]]` project.
     fn new(project: &Project) -> Watcher {
-        let mut files = vec![project.config_path()];
-        for f in &project.config.schema.proto_files {
-            files.push(project.dir.join(f));
+        let mut files = Vec::new();
+        for d in project.all_devices() {
+            let p = d.project;
+            files.push(p.config_path());
+            for f in &p.config.schema.proto_files {
+                files.push(p.dir.join(f));
+            }
+            if let Some(ds) = &p.config.schema.descriptor_set {
+                files.push(p.dir.join(ds));
+            }
         }
-        if let Some(d) = &project.config.schema.descriptor_set {
-            files.push(project.dir.join(d));
-        }
+        files.sort();
+        files.dedup();
         Watcher {
             files: files
                 .into_iter()

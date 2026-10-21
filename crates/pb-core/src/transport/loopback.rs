@@ -1,4 +1,8 @@
 //! In-process loopback: two connected ends, used for the built-in simulator.
+//!
+//! In stream mode a read returns whatever is queued, like a serial port. In
+//! message mode each write arrives as exactly one read, like a datagram, so
+//! projects with `framing.type = "none"` work with the simulator too.
 
 use std::io;
 
@@ -12,10 +16,17 @@ pub struct LoopbackEnd {
     rx: Receiver<Vec<u8>>,
     pending: Vec<u8>,
     name: &'static str,
+    messages: bool,
 }
 
-/// Creates two connected ends: `(host, device)`.
+/// Creates two connected stream ends: `(host, device)`.
 pub fn pair() -> (LoopbackEnd, LoopbackEnd) {
+    pair_with_mode(false)
+}
+
+/// Creates two connected ends that keep message boundaries when `messages`
+/// is true.
+pub fn pair_with_mode(messages: bool) -> (LoopbackEnd, LoopbackEnd) {
     let (a_tx, a_rx) = crossbeam_channel::unbounded();
     let (b_tx, b_rx) = crossbeam_channel::unbounded();
     (
@@ -24,12 +35,14 @@ pub fn pair() -> (LoopbackEnd, LoopbackEnd) {
             rx: b_rx,
             pending: Vec::new(),
             name: "loopback (host end)",
+            messages,
         },
         LoopbackEnd {
             tx: b_tx,
             rx: a_rx,
             pending: Vec::new(),
             name: "loopback (device end)",
+            messages,
         },
     )
 }
@@ -57,7 +70,7 @@ impl Transport for LoopbackEnd {
             Ok(chunk) => {
                 self.pending = chunk;
                 // Coalesce whatever else is queued, up to the buffer size.
-                while self.pending.len() < buf.len() {
+                while !self.messages && self.pending.len() < buf.len() {
                     match self.rx.try_recv() {
                         Ok(more) => self.pending.extend_from_slice(&more),
                         Err(_) => break,
@@ -82,6 +95,10 @@ impl Transport for LoopbackEnd {
     fn describe(&self) -> String {
         self.name.to_string()
     }
+
+    fn message_based(&self) -> bool {
+        self.messages
+    }
 }
 
 #[cfg(test)]
@@ -102,5 +119,19 @@ mod tests {
         assert_eq!(a.read(&mut small).unwrap(), 1);
         drop(b);
         assert!(a.read(&mut buf).is_err());
+    }
+
+    #[test]
+    fn message_mode_keeps_boundaries() {
+        let (mut a, mut b) = pair_with_mode(true);
+        assert!(a.message_based());
+        a.write_all(b"one").unwrap();
+        a.write_all(b"two").unwrap();
+        let mut buf = [0u8; 64];
+        let n = b.read(&mut buf).unwrap();
+        assert_eq!(&buf[..n], b"one");
+        let n = b.read(&mut buf).unwrap();
+        assert_eq!(&buf[..n], b"two");
+        assert!(!pair().0.message_based());
     }
 }

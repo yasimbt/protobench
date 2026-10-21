@@ -604,6 +604,36 @@ mod tests {
     }
 
     #[test]
+    fn bad_profiles_are_reported_with_lines() {
+        let mut text = std::fs::read_to_string(demo().config_path()).unwrap();
+        text = text.replace("host = \"192.168.1.50\"", "host = \"\"");
+        text = text.replace(
+            "[[connection.profiles]]\nname = \"sim\"\ntransport = \"sim\"\n",
+            "[[connection.profiles]]\nname = \"sim\"\ntransport = \"sim\"\n\n[[connection.profiles]]\nname = \"dgram\"\ntransport = \"udp\"\ntarget = \"10.0.0.9\"\n\n[[connection.profiles]]\nname = \"rec\"\ntransport = \"replay\"\n",
+        );
+        let p = Project::from_text(crate::schema::tests::demo_dir(), text.clone());
+        let d: Vec<String> = check_project(&p).iter().map(|d| d.to_string()).collect();
+        let line_of = |needle: &str| text.lines().position(|l| l.contains(needle)).unwrap() + 1;
+        let has = |line: usize, msg: &str| {
+            d.iter()
+                .any(|t| t.contains(&format!("project.toml:{line}: error:")) && t.contains(msg))
+        };
+        assert!(
+            has(line_of("host = \"\""), "tcp_client needs `host`"),
+            "{d:#?}"
+        );
+        assert!(
+            has(line_of("target = \"10.0.0.9\""), "not host:port"),
+            "{d:#?}"
+        );
+        // A missing key points at the profile's table header.
+        assert!(
+            has(line_of("name = \"rec\"") - 1, "replay needs `file`"),
+            "{d:#?}"
+        );
+    }
+
+    #[test]
     fn channel_patterns() {
         assert!(channel_matches("telemetry.adc[*]", "telemetry.adc[3]"));
         assert!(channel_matches("telemetry.adc", "telemetry.adc[0]"));

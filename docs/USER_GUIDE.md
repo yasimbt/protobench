@@ -187,7 +187,7 @@ Theme; ring-buffer size per channel (default 1,000,000 points; applies on the ne
 - **Record ▸ Export recording to MCAP…**: pick a `.pbsession`, then an output file. Each message type gets its own channel (`/rx/telemetry`, `/tx/set_bias`, …) with `protobuf` schema and message encoding, so Foxglove Studio and PlotJuggler can open it. Text lines go to `/text` and markers to `/markers` as JSON.
 - The time plot's right-click menu exports just the visible range.
 
-**Replay.** A profile with `transport = "replay"`, `file = "recordings/….pbsession"` and `speed` (1 = real time, 0 = as fast as possible) plays the recording's received frames and text lines back through the normal pipeline, so all panels work offline. The status bar shows "Replay finished" at the end.
+**Replay.** A profile with `transport = "replay"`, `file = "recordings/….pbsession"` and `speed` (1 = real time, 0 = as fast as possible) plays the recording's received frames and text lines back through the normal pipeline, so all panels work offline. Text lines are replayed as text whatever the framing settings, and with `framing.type = "none"` each recorded frame arrives as one read. The status bar shows "Replay finished" at the end.
 
 ## Sequences
 

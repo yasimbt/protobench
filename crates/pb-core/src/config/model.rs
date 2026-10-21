@@ -131,7 +131,28 @@ pub enum TransportKind {
     Replay,
 }
 
+/// How a transport delivers data, which decides the framing that suits it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkKind {
+    /// A byte stream: frames need a framer (cobs, slip, a length prefix).
+    Stream,
+    /// One whole message per read: `framing.type = "none"`.
+    Message,
+    /// Either works (UDP datagrams, the simulator, replay).
+    Either,
+}
+
 impl TransportKind {
+    /// Every kind, in the order the GUI lists them.
+    pub const ALL: &'static [TransportKind] = &[
+        TransportKind::Serial,
+        TransportKind::TcpClient,
+        TransportKind::TcpServer,
+        TransportKind::Udp,
+        TransportKind::Sim,
+        TransportKind::Replay,
+    ];
+
     /// The name used in `project.toml`.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -141,6 +162,16 @@ impl TransportKind {
             TransportKind::Udp => "udp",
             TransportKind::Sim => "sim",
             TransportKind::Replay => "replay",
+        }
+    }
+
+    /// Stream or message link.
+    pub fn link_kind(self) -> LinkKind {
+        match self {
+            TransportKind::Serial | TransportKind::TcpClient | TransportKind::TcpServer => {
+                LinkKind::Stream
+            }
+            TransportKind::Udp | TransportKind::Sim | TransportKind::Replay => LinkKind::Either,
         }
     }
 }

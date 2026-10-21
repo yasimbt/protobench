@@ -23,7 +23,7 @@ use pb_core::error::CoreError;
 use pb_core::framing::{build_framer, FrameEvent, Framer};
 use pb_core::project::Project;
 use pb_core::schema::{FieldPath, Schema};
-use pb_core::transport::{loopback_pair, SimFactory, TcpServer, Transport};
+use pb_core::transport::{loopback_pair_with_mode, SimFactory, TcpServer, Transport};
 use pb_core::util::Rng;
 
 pub use generators::{Gen, GenValue};
@@ -240,7 +240,9 @@ impl Simulator {
         let start_ns = clock.now_ns();
         Ok(Simulator {
             framer: build_framer(&config.framing),
-            text: config.framing.text_passthrough,
+            // Log lines need a framer that can tell them from frames.
+            text: config.framing.text_passthrough
+                && config.framing.kind != pb_core::config::FramingType::None,
             cfg: config.simulator.clone(),
             streams,
             responses,
@@ -294,17 +296,16 @@ impl Simulator {
         ns.saturating_sub(self.start_ns) as f64 / 1e9
     }
 
-    /// Frames a payload with fault injection, appending to `out`.
-    fn emit(&mut self, payload: &[u8], out: &mut Vec<u8>) {
+    /// Frames a payload with fault injection, appending one write unit per
+    /// frame (and per garbage burst) to `out`.
+    fn emit(&mut self, payload: &[u8], out: &mut Vec<Vec<u8>>) {
         if self.rng.chance(self.cfg.drop_rate) {
             self.stats.dropped.fetch_add(1, Ordering::Relaxed);
             return;
         }
         if self.rng.chance(self.cfg.garbage_rate) {
             let n = 1 + self.rng.below(8) as usize;
-            for _ in 0..n {
-                out.push(self.rng.below(256) as u8);
-            }
+            out.push((0..n).map(|_| self.rng.below(256) as u8).collect());
             self.stats.garbage.fetch_add(1, Ordering::Relaxed);
         }
         let mut wire = self.framer.encode(payload);
@@ -323,7 +324,7 @@ impl Simulator {
             }
             self.stats.corrupted.fetch_add(1, Ordering::Relaxed);
         }
-        out.extend_from_slice(&wire);
+        out.push(wire);
     }
 
     fn build(&self, target: &MessageTarget, payload: Json) -> Result<DynamicMessage, CoreError> {
@@ -333,6 +334,12 @@ impl Simulator {
     /// Feeds bytes received from the host and advances time to `now_ns`.
     /// Returns the bytes the device writes.
     pub fn step(&mut self, incoming: &[u8], now_ns: u64) -> Vec<u8> {
+        self.step_frames(incoming, now_ns).concat()
+    }
+
+    /// Like [`Simulator::step`], but returns each frame (or garbage burst,
+    /// or log line) separately, for links that keep message boundaries.
+    pub fn step_frames(&mut self, incoming: &[u8], now_ns: u64) -> Vec<Vec<u8>> {
         let mut out = Vec::new();
         let mut events = std::mem::take(&mut self.events);
         events.clear();
@@ -396,12 +403,12 @@ impl Simulator {
                     self.stats.stream_msgs.load(Ordering::Relaxed)
                 ),
             };
-            out.extend_from_slice(line.as_bytes());
+            out.push(line.into_bytes());
         }
         out
     }
 
-    fn handle_request(&mut self, payload: &[u8], now_ns: u64, out: &mut Vec<u8>) {
+    fn handle_request(&mut self, payload: &[u8], now_ns: u64, out: &mut Vec<Vec<u8>>) {
         let Ok(req) = self.codec.decode(payload, now_ns) else {
             return;
         };
@@ -495,8 +502,16 @@ impl Simulator {
             }
             had_peer = peer;
             let now = self.clock.now_ns();
-            let out = self.step(&buf[..n], now);
-            if !out.is_empty() && transport.write_all(&out).is_err() {
+            let frames = self.step_frames(&buf[..n], now);
+            if frames.is_empty() {
+                continue;
+            }
+            let ok = if transport.message_based() {
+                frames.iter().all(|f| transport.write_all(f).is_ok())
+            } else {
+                transport.write_all(&frames.concat()).is_ok()
+            };
+            if !ok {
                 return;
             }
         }
@@ -525,9 +540,11 @@ pub fn sim_factory(project: &Project) -> Result<SimFactory, CoreError> {
     let config = project.config.clone();
     // Validate once so configuration errors surface at connect time.
     Simulator::new(&config, &schema, SystemClock::shared())?;
+    // Without framing, frames are told apart by keeping write boundaries.
+    let messages = config.framing.kind == pb_core::config::FramingType::None;
     Ok(Arc::new(move || {
         let sim = Simulator::new(&config, &schema, SystemClock::shared())?;
-        let (host, dev) = loopback_pair();
+        let (host, dev) = loopback_pair_with_mode(messages);
         let stop = Arc::new(AtomicBool::new(false));
         std::thread::Builder::new()
             .name("protobench-sim".into())

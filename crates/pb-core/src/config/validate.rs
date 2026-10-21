@@ -66,43 +66,7 @@ pub fn validate(c: &ProjectConfig) -> Vec<Finding> {
                 format!("stop_bits must be 1 or 2, got {}", p.stop_bits),
             );
         }
-        match p.transport {
-            TransportKind::TcpClient if p.host.trim().is_empty() => f.err(
-                key_path!["connection", "profiles", i, "host"],
-                "tcp_client needs `host`".into(),
-            ),
-            TransportKind::Replay if p.file.is_none() => f.err(
-                key_path!["connection", "profiles", i],
-                "replay needs `file`".into(),
-            ),
-            TransportKind::Serial
-                if p.port == "auto"
-                    && p.usb_vid.is_none()
-                    && p.usb_pid.is_none()
-                    && p.usb_serial.is_none() =>
-            {
-                f.warn(
-                    key_path!["connection", "profiles", i, "port"],
-                    "port = \"auto\" without usb_vid, usb_pid or usb_serial only works with exactly one USB serial port attached".into(),
-                )
-            }
-            _ => {}
-        }
-        if p.transport == TransportKind::Serial && p.port != "auto" && p.usb_serial.is_some() {
-            f.warn(
-                key_path!["connection", "profiles", i, "usb_serial"],
-                format!(
-                    "usb_serial is only used with port = \"auto\"; this profile opens `{}`",
-                    p.port
-                ),
-            );
-        }
-        if p.speed < 0.0 {
-            f.err(
-                key_path!["connection", "profiles", i, "speed"],
-                "speed must be >= 0".into(),
-            );
-        }
+        validate_profile(p, i, &c.framing, &mut f);
     }
     if let Some(name) = &c.connection.profile {
         if c.profile(name).is_none() {
@@ -309,6 +273,95 @@ pub fn validate(c: &ProjectConfig) -> Vec<Finding> {
     f.0
 }
 
+/// True for `host:port` with a numeric port.
+fn is_host_port(s: &str) -> bool {
+    s.rsplit_once(':')
+        .is_some_and(|(h, p)| !h.trim().is_empty() && p.trim().parse::<u16>().is_ok())
+}
+
+/// Required fields of each transport kind, and a framing that suits it.
+fn validate_profile(p: &ConnectionProfile, i: usize, framing: &FramingConfig, f: &mut Findings) {
+    let at = |k: &str| key_path!["connection", "profiles", i, k];
+    let kind = p.transport.as_str();
+    match p.transport {
+        TransportKind::Serial => {
+            if p.port.trim().is_empty() {
+                f.err(
+                    at("port"),
+                    "serial needs `port` (a name or \"auto\")".into(),
+                );
+            }
+            if p.baud == 0 {
+                f.err(at("baud"), "baud must be > 0".into());
+            }
+            if p.port == "auto"
+                && p.usb_vid.is_none()
+                && p.usb_pid.is_none()
+                && p.usb_serial.is_none()
+            {
+                f.warn(
+                    at("port"),
+                    "port = \"auto\" without usb_vid, usb_pid or usb_serial only works with exactly one USB serial port attached".into(),
+                );
+            }
+            if p.port != "auto" && p.usb_serial.is_some() {
+                f.warn(
+                    at("usb_serial"),
+                    format!(
+                        "usb_serial is only used with port = \"auto\"; this profile opens `{}`",
+                        p.port
+                    ),
+                );
+            }
+        }
+        TransportKind::TcpClient => {
+            if p.host.trim().is_empty() {
+                f.err(at("host"), "tcp_client needs `host`".into());
+            }
+            if p.tcp_port == 0 {
+                f.err(at("tcp_port"), "tcp_client needs `tcp_port`".into());
+            }
+        }
+        TransportKind::TcpServer => {}
+        TransportKind::Udp => {
+            if let Some(b) = p.bind.as_deref().filter(|b| !is_host_port(b)) {
+                f.err(at("bind"), format!("udp bind `{b}` is not host:port"));
+            }
+            if let Some(t) = p.target.as_deref().filter(|t| !is_host_port(t)) {
+                f.err(at("target"), format!("udp target `{t}` is not host:port"));
+            }
+        }
+        TransportKind::Sim => {}
+        TransportKind::Replay => {
+            if p.file.as_deref().is_none_or(|x| x.trim().is_empty()) {
+                f.err(
+                    key_path!["connection", "profiles", i],
+                    "replay needs `file`".into(),
+                );
+            }
+            if p.speed < 0.0 {
+                f.err(at("speed"), "speed must be >= 0".into());
+            }
+        }
+    }
+    let none = framing.kind == FramingType::None;
+    match p.transport.link_kind() {
+        LinkKind::Stream if none => f.warn(
+            at("transport"),
+            format!(
+                "`{kind}` is a byte stream, but framing type = \"none\" treats every read as one frame; use cobs, slip or a length prefix"
+            ),
+        ),
+        LinkKind::Message if !none => f.warn(
+            at("transport"),
+            format!(
+                "`{kind}` delivers whole messages; framing type = \"none\" is the usual choice (each message is one frame)"
+            ),
+        ),
+        _ => {}
+    }
+}
+
 /// Parses `#rrggbb` (or `rrggbb`) into RGB.
 pub fn parse_colour(s: &str) -> Option<[u8; 3]> {
     let h = s.trim().trim_start_matches('#');
@@ -396,5 +449,101 @@ mod tests {
         assert!(f
             .iter()
             .any(|(_, e, m)| *e && m.contains("default profile")));
+    }
+
+    fn base() -> ProjectConfig {
+        let mut c = ProjectConfig::default();
+        c.schema.proto_files.push("a.proto".into());
+        c.codec.tx_root = Some("a.T".into());
+        c.codec.rx_root = Some("a.R".into());
+        c
+    }
+
+    fn profile_findings(c: &ProjectConfig) -> Vec<(String, bool, String)> {
+        validate(c)
+            .into_iter()
+            .map(|(p, e, m)| (crate::config::path_to_string(&p), e, m))
+            .collect()
+    }
+
+    #[test]
+    fn each_transport_kind_reports_missing_fields() {
+        let mut c = base();
+        let bad = |t: TransportKind, edit: &dyn Fn(&mut ConnectionProfile)| {
+            let mut p = ConnectionProfile {
+                name: t.as_str().into(),
+                transport: t,
+                ..Default::default()
+            };
+            edit(&mut p);
+            p
+        };
+        c.connection.profiles = vec![
+            bad(TransportKind::Serial, &|p| p.port = " ".into()),
+            bad(TransportKind::TcpClient, &|p| {
+                p.host = String::new();
+                p.tcp_port = 0;
+            }),
+            bad(TransportKind::Udp, &|p| p.target = Some("nohost".into())),
+            bad(TransportKind::Replay, &|p| p.speed = -1.0),
+        ];
+        let f = profile_findings(&c);
+        let has =
+            |key: &str, text: &str| f.iter().any(|(k, e, m)| *e && k == key && m.contains(text));
+        assert!(
+            has("connection.profiles[0].port", "serial needs `port`"),
+            "{f:#?}"
+        );
+        assert!(has("connection.profiles[1].host", "needs `host`"), "{f:#?}");
+        assert!(
+            has("connection.profiles[1].tcp_port", "needs `tcp_port`"),
+            "{f:#?}"
+        );
+        assert!(
+            has("connection.profiles[2].target", "not host:port"),
+            "{f:#?}"
+        );
+        assert!(
+            has("connection.profiles[3]", "replay needs `file`"),
+            "{f:#?}"
+        );
+        assert!(has("connection.profiles[3].speed", ">= 0"), "{f:#?}");
+        // Sim and tcp_server need nothing beyond their defaults.
+        c.connection.profiles = vec![
+            bad(TransportKind::Sim, &|_| {}),
+            bad(TransportKind::TcpServer, &|_| {}),
+        ];
+        assert!(profile_findings(&c).iter().all(|(_, e, _)| !e));
+    }
+
+    #[test]
+    fn framing_must_suit_the_link() {
+        let mut c = base();
+        c.connection.profiles = vec![
+            ConnectionProfile {
+                name: "usb".into(),
+                port: "COM3".into(),
+                ..Default::default()
+            },
+            ConnectionProfile {
+                name: "udp".into(),
+                transport: TransportKind::Udp,
+                ..Default::default()
+            },
+        ];
+        c.framing.kind = FramingType::None;
+        let f = profile_findings(&c);
+        let warned = |i: usize| {
+            f.iter().any(|(k, e, m)| {
+                !e && k == &format!("connection.profiles[{i}].transport")
+                    && m.contains("byte stream")
+            })
+        };
+        assert!(warned(0), "{f:#?}");
+        assert!(!warned(1), "UDP datagrams suit any framing: {f:#?}");
+        c.framing.kind = FramingType::Cobs;
+        assert!(profile_findings(&c)
+            .iter()
+            .all(|(k, _, _)| !k.ends_with(".transport")));
     }
 }

@@ -768,7 +768,10 @@ impl Worker {
         let mut attempts: u32 = 0;
         let mut gave_up = false;
         let mut finished = false;
-        let mut buf = vec![0u8; 64 * 1024];
+        // A message-based link returns a whole message per read, so the
+        // buffer must hold the largest frame.
+        let frame_max = self.params.config.framing.max_frame_len + 64;
+        let mut buf = vec![0u8; frame_max.max(64 * 1024)];
         let mut last_tick_ns = 0u64;
         let mut had_peer = false;
         loop {
@@ -849,6 +852,10 @@ impl Worker {
                         self.handle_rx(&data, t.as_mut());
                     }
                     Err(e) => lost = Some(e.to_string()),
+                }
+                for line in t.take_text() {
+                    let ts = self.now();
+                    self.text_line(line, ts);
                 }
                 if t.finished() {
                     finished = true;
@@ -1153,15 +1160,7 @@ impl Worker {
         for ev in events.drain(..) {
             match ev {
                 FrameEvent::Frame(payload) => self.handle_frame(payload, ts),
-                FrameEvent::Text(line) => {
-                    LinkCounters::add(&self.shared.counters.text_lines, 1);
-                    self.shared
-                        .record(RecordKind::TextLine, ts, line.as_bytes());
-                    self.shared.emit(SessionEvent::Text {
-                        host_ts_ns: ts,
-                        line,
-                    });
-                }
+                FrameEvent::Text(line) => self.text_line(line, ts),
                 FrameEvent::Error {
                     kind,
                     reason,
@@ -1182,6 +1181,17 @@ impl Worker {
                 }
             }
         }
+    }
+
+    /// A text line from text passthrough or a link's side channel.
+    fn text_line(&self, line: String, ts: u64) {
+        LinkCounters::add(&self.shared.counters.text_lines, 1);
+        self.shared
+            .record(RecordKind::TextLine, ts, line.as_bytes());
+        self.shared.emit(SessionEvent::Text {
+            host_ts_ns: ts,
+            line,
+        });
     }
 
     fn bad_frame(&self, kind: &'static str, reason: String, bytes: Vec<u8>, ts: u64) {

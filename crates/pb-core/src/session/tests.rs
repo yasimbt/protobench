@@ -463,3 +463,79 @@ fn stalled_tcp_peer_times_out_instead_of_hanging() {
     assert!(t1.elapsed() < Duration::from_secs(1));
     hold.join().unwrap();
 }
+
+/// A link with a side channel: it never returns bytes, but hands out text
+/// lines through `take_text`, like an RTT printf channel.
+struct SideChannel {
+    lines: Arc<parking_lot::Mutex<Vec<String>>>,
+}
+
+impl Transport for SideChannel {
+    fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+        std::thread::sleep(Duration::from_millis(1));
+        Ok(0)
+    }
+    fn write_all(&mut self, _data: &[u8]) -> std::io::Result<()> {
+        Ok(())
+    }
+    fn describe(&self) -> String {
+        "side channel".into()
+    }
+    fn take_text(&mut self) -> Vec<String> {
+        std::mem::take(&mut *self.lines.lock())
+    }
+}
+
+type Records = Arc<parking_lot::Mutex<Vec<(RecordKind, Vec<u8>)>>>;
+
+/// Collects recorded records for assertions.
+struct Collect(Records);
+
+impl RecordSink for Collect {
+    fn record(&mut self, kind: RecordKind, _ts: u64, bytes: &[u8]) {
+        self.0.lock().push((kind, bytes.to_vec()));
+    }
+    fn finish(&mut self) -> Result<(), CoreError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn side_channel_text_is_shown_counted_and_recorded() {
+    let p = project();
+    let lines = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let l2 = lines.clone();
+    let connector: Connector =
+        Box::new(move || Ok(Box::new(SideChannel { lines: l2.clone() }) as Box<dyn Transport>));
+    let profile = p.config.profile("sim").unwrap().clone();
+    let params = SessionParams::new(&p, &profile).unwrap();
+    let s = Session::start(params, connector, SystemClock::shared()).unwrap();
+    assert_eq!(
+        s.wait_connected(Duration::from_secs(2)),
+        ConnState::Connected
+    );
+    let events = s.subscribe();
+    let recorded = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    s.start_recording(Box::new(Collect(recorded.clone())));
+    lines
+        .lock()
+        .extend(["I: boot".to_string(), "W: low battery".to_string()]);
+    let mut got = Vec::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while got.len() < 2 && std::time::Instant::now() < deadline {
+        if let Ok(SessionEvent::Text { line, .. }) = events.recv_timeout(Duration::from_millis(50))
+        {
+            got.push(line);
+        }
+    }
+    assert_eq!(got, ["I: boot", "W: low battery"]);
+    assert_eq!(s.shared().counters.snapshot().text_lines, 2);
+    let rec = recorded.lock().clone();
+    assert_eq!(
+        rec,
+        vec![
+            (RecordKind::TextLine, b"I: boot".to_vec()),
+            (RecordKind::TextLine, b"W: low battery".to_vec())
+        ]
+    );
+}

@@ -14,7 +14,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub use loopback::{pair as loopback_pair, LoopbackEnd};
+pub use loopback::{pair as loopback_pair, pair_with_mode as loopback_pair_with_mode, LoopbackEnd};
 pub use net::{TcpClient, TcpServer, UdpTransport};
 pub use replay::ReplayTransport;
 pub use serial::{list_ports, pulse, resolve_port, select_port, PortInfo, SerialTransport};
@@ -60,6 +60,18 @@ pub trait Transport: Send {
     }
     /// True if the transport ends by itself (replay at end of file).
     fn finished(&self) -> bool {
+        false
+    }
+    /// Text lines that arrived on a side channel (e.g. an RTT printf
+    /// channel), taken once. The session shows and records them like text
+    /// passthrough lines. Called after every `read`.
+    fn take_text(&mut self) -> Vec<String> {
+        Vec::new()
+    }
+    /// True if every `read` returns exactly one whole message (MQTT, CAN,
+    /// UDP datagrams), so `framing.type = "none"` finds the boundaries.
+    /// False for byte streams, which need a framer.
+    fn message_based(&self) -> bool {
         false
     }
 }

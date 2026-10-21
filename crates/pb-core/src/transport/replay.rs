@@ -1,6 +1,8 @@
 //! Replay transport: plays back the received frames and text lines of a
 //! `.pbsession` recording through the normal framing pipeline, at 1×, N× or
-//! maximum speed.
+//! maximum speed. Frames are re-framed with the project's framer; text
+//! lines come back through [`Transport::take_text`], whatever the framing.
+//! With `framing.type = "none"` each frame is one read.
 
 use std::io;
 use std::path::Path;
@@ -13,15 +15,22 @@ use crate::framing::build_framer;
 use crate::recorder::SessionReader;
 use crate::session::RecordKind;
 
+enum Chunk {
+    Bytes(Vec<u8>),
+    Text(String),
+}
+
 /// Plays back a recording.
 pub struct ReplayTransport {
-    chunks: Vec<(u64, Vec<u8>)>,
+    chunks: Vec<(u64, Chunk)>,
     next: usize,
     start: Instant,
     t0: u64,
     speed: f64,
     name: String,
     pending: Vec<u8>,
+    text: Vec<String>,
+    messages: bool,
 }
 
 impl ReplayTransport {
@@ -32,12 +41,13 @@ impl ReplayTransport {
         let mut chunks = Vec::new();
         while let Some(rec) = r.next_record()? {
             match rec.kind {
-                RecordKind::RxFrame => chunks.push((rec.host_ts_ns, framer.encode(&rec.bytes))),
-                RecordKind::TextLine if framing.text_passthrough => {
-                    let mut b = rec.bytes;
-                    b.push(b'\n');
-                    chunks.push((rec.host_ts_ns, b));
+                RecordKind::RxFrame => {
+                    chunks.push((rec.host_ts_ns, Chunk::Bytes(framer.encode(&rec.bytes))))
                 }
+                RecordKind::TextLine => chunks.push((
+                    rec.host_ts_ns,
+                    Chunk::Text(String::from_utf8_lossy(&rec.bytes).into_owned()),
+                )),
                 _ => {}
             }
         }
@@ -58,6 +68,8 @@ impl ReplayTransport {
                 }
             ),
             pending: Vec::new(),
+            text: Vec::new(),
+            messages: framing.kind == crate::config::FramingType::None,
         })
     }
 
@@ -87,13 +99,17 @@ impl Transport for ReplayTransport {
             while self.next < self.chunks.len()
                 && self.due(self.next) <= now
                 && self.pending.len() < buf.len()
+                // One frame per read when frames carry no framing.
+                && (!self.messages || self.pending.is_empty())
             {
-                let c = std::mem::take(&mut self.chunks[self.next].1);
-                self.pending.extend_from_slice(&c);
+                match std::mem::replace(&mut self.chunks[self.next].1, Chunk::Bytes(Vec::new())) {
+                    Chunk::Bytes(b) => self.pending.extend_from_slice(&b),
+                    Chunk::Text(t) => self.text.push(t),
+                }
                 self.next += 1;
             }
             if self.pending.is_empty() {
-                if self.next < self.chunks.len() {
+                if self.next < self.chunks.len() && self.text.is_empty() {
                     let wait = self.due(self.next).saturating_sub(now).min(READ_TIMEOUT);
                     std::thread::sleep(wait);
                 }
@@ -116,6 +132,14 @@ impl Transport for ReplayTransport {
     }
 
     fn finished(&self) -> bool {
-        self.next >= self.chunks.len() && self.pending.is_empty()
+        self.next >= self.chunks.len() && self.pending.is_empty() && self.text.is_empty()
+    }
+
+    fn take_text(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.text)
+    }
+
+    fn message_based(&self) -> bool {
+        self.messages
     }
 }

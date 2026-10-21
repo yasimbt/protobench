@@ -211,6 +211,37 @@ fn smoke_sequence_passes_on_loopback() {
 }
 
 #[test]
+fn smoke_sequence_passes_without_framing_on_a_message_link() {
+    // framing = "none": the simulator's loopback keeps write boundaries, so
+    // each read is one frame, as on MQTT, CAN or UDP.
+    let mut p = demo();
+    p.config.framing.kind = pb_core::config::FramingType::None;
+    let r = run_smoke(&p, "sim", None);
+    assert!(r.passed, "{}", r.summary_text());
+    // A recording made without framing replays one frame per read.
+    let path = record_some(&p, 300);
+    let off = pb_core::recorder::OfflineSession::open(&path).unwrap();
+    let rx = off
+        .records
+        .iter()
+        .filter(|r| r.kind == pb_core::session::RecordKind::RxFrame)
+        .count();
+    assert!(rx > 100);
+    let mut r = pb_core::transport::ReplayTransport::open(&path, 0.0, &p.config.framing).unwrap();
+    use pb_core::transport::Transport;
+    assert!(r.message_based());
+    let mut buf = vec![0u8; 4096];
+    let mut frames = 0;
+    while !r.finished() {
+        if r.read(&mut buf).unwrap() > 0 {
+            frames += 1;
+        }
+    }
+    assert_eq!(frames, rx);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn smoke_sequence_passes_over_tcp() {
     let p = demo();
     let (port, stop) = pb_sim::spawn_tcp_server(&p).unwrap();
@@ -491,6 +522,14 @@ fn replay_transport_plays_back_a_recording() {
     assert_eq!(s.state(), ConnState::Finished);
     assert_eq!(s.shared().counters.snapshot().rx_msgs as usize, rx);
     assert!(s.telemetry().get("telemetry.vout_raw").unwrap().total() > 200);
+    // Text lines come back through the side channel.
+    let text = off
+        .records
+        .iter()
+        .filter(|r| r.kind == pb_core::session::RecordKind::TextLine)
+        .count();
+    assert!(text > 0);
+    assert_eq!(s.shared().counters.snapshot().text_lines as usize, text);
     // Real-time replay takes about as long as the recording.
     prof.speed = 1.0;
     let mut r = pb_core::transport::ReplayTransport::open(&path, 1.0, &p.config.framing).unwrap();
@@ -499,6 +538,7 @@ fn replay_transport_plays_back_a_recording() {
     let mut buf = vec![0u8; 4096];
     while !r.finished() {
         r.read(&mut buf).unwrap();
+        r.take_text();
     }
     assert!(
         t0.elapsed() >= Duration::from_millis(200),

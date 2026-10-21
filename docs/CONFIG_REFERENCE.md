@@ -85,6 +85,8 @@ The `sim` transport runs the built-in simulator in-process. A `tcp_server` serve
 
 `none` treats every transport read (one UDP datagram, for example) as one frame. See `FIRMWARE_INTEGRATION.md` for the byte layouts.
 
+The framing has to suit the link. Byte streams (`serial`, `tcp_client`, `tcp_server`) need a framer that marks frame boundaries, so `none` is wrong for them. Links that deliver whole messages need none, so `none` is the usual choice there. `udp`, `sim` and `replay` work with any framing: the simulator and replay keep one frame per read when the framing is `none`. `protobench check` and the project editor warn about a mismatch.
+
 ### `[codec]`
 
 | Key | Type | Default | Meaning |

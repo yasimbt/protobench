@@ -1064,6 +1064,21 @@ fn transport_label(t: TransportKind) -> &'static str {
     t.as_str()
 }
 
+/// A warning when the framing does not suit the link (the same rule as
+/// `protobench check`).
+fn framing_hint(t: TransportKind, framing: FramingType) -> Option<&'static str> {
+    use pb_core::config::LinkKind;
+    match (t.link_kind(), framing == FramingType::None) {
+        (LinkKind::Stream, true) => {
+            Some("byte stream: framing \"none\" cannot find frame boundaries")
+        }
+        (LinkKind::Message, false) => {
+            Some("delivers whole messages: framing \"none\" is the usual choice")
+        }
+        _ => None,
+    }
+}
+
 /// The attached serial ports: pick one by name, or match a USB board by
 /// VID/PID and serial number (`port = "auto"`).
 fn port_menu(ui: &mut egui::Ui, pr: &mut ConnectionProfile) {
@@ -1144,6 +1159,7 @@ pub fn project_editor(
         es.sync_text = pb_core::util::hex(&p.config.framing.sync_word);
     }
     let mut saved = false;
+    let framing_kind = es.framing.as_ref().map(|f| f.kind).unwrap_or_default();
     egui::ScrollArea::vertical()
         .max_height(ui.available_height() - 40.0)
         .show(ui, |ui| {
@@ -1162,18 +1178,16 @@ pub fn project_editor(
                             egui::ComboBox::from_id_salt(("tr", i))
                                 .selected_text(transport_label(pr.transport))
                                 .show_ui(ui, |ui| {
-                                    for t in [
-                                        TransportKind::Serial,
-                                        TransportKind::TcpClient,
-                                        TransportKind::TcpServer,
-                                        TransportKind::Udp,
-                                        TransportKind::Sim,
-                                        TransportKind::Replay,
-                                    ] {
+                                    for &t in TransportKind::ALL {
                                         ui.selectable_value(&mut pr.transport, t, t.as_str());
                                     }
                                 });
                             ui.end_row();
+                            if let Some(w) = framing_hint(pr.transport, framing_kind) {
+                                ui.label("");
+                                ui.label(RichText::new(w).color(WARN));
+                                ui.end_row();
+                            }
                             match pr.transport {
                                 TransportKind::Serial => {
                                     ui.label("port");

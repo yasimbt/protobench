@@ -251,6 +251,9 @@ impl Transport for UdpTransport {
             None => format!("udp {local} (no peer yet)"),
         }
     }
+    fn message_based(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]

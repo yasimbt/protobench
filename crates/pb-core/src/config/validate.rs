@@ -522,6 +522,37 @@ fn validate_profile(p: &ConnectionProfile, i: usize, framing: &FramingConfig, f:
                 );
             }
         }
+        TransportKind::Ble => {
+            if p.ble_name.as_deref().is_none_or(|n| n.trim().is_empty()) && p.ble_address.is_none()
+            {
+                f.err(
+                    key_path!["connection", "profiles", i],
+                    "ble needs `ble_name` or `ble_address`".into(),
+                );
+            }
+            if let Some(Err(e)) = p
+                .ble_address
+                .as_deref()
+                .map(crate::transport::ble::parse_address)
+            {
+                f.err(at("ble_address"), e);
+            }
+            for (k, v) in [
+                ("service", &p.service),
+                ("rx_char", &p.rx_char),
+                ("tx_char", &p.tx_char),
+            ] {
+                if let Err(e) = crate::transport::ble::parse_uuid(v) {
+                    f.err(at(k), e);
+                }
+            }
+            if !crate::transport::ble::SUPPORTED {
+                f.warn(
+                    at("transport"),
+                    "this build has no Bluetooth support (cargo feature `ble`)".into(),
+                );
+            }
+        }
         TransportKind::Replay => {
             if p.file.as_deref().is_none_or(|x| x.trim().is_empty()) {
                 f.err(
@@ -687,6 +718,10 @@ mod tests {
                 p.bitrate = 333_000;
             }),
             bad(TransportKind::Rtt, &|p| p.rtt_text_channel = Some(1)),
+            bad(TransportKind::Ble, &|p| {
+                p.rx_char = "6e400002".into();
+                p.ble_address = Some("C0:FF:EE".into());
+            }),
             bad(TransportKind::Can, &|p| {
                 p.tx_id = Some(0x10);
                 p.rx_id = Some(0x10);
@@ -752,10 +787,21 @@ mod tests {
             has("connection.profiles[7].rtt_text_channel", "both channel 1"),
             "{f:#?}"
         );
-        assert!(has("connection.profiles[8].rx_id", "must differ"), "{f:#?}");
+        assert!(
+            has("connection.profiles[8].rx_char", "is not a UUID"),
+            "{f:#?}"
+        );
         assert!(
             has(
-                "connection.profiles[8].interface",
+                "connection.profiles[8].ble_address",
+                "not a Bluetooth address"
+            ),
+            "{f:#?}"
+        );
+        assert!(has("connection.profiles[9].rx_id", "must differ"), "{f:#?}");
+        assert!(
+            has(
+                "connection.profiles[9].interface",
                 "socketcan needs `interface`"
             ),
             "{f:#?}"

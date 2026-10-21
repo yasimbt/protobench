@@ -49,6 +49,11 @@ jobs:
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: clippy (pb-core without default features)
         run: cargo clippy --locked -p pb-core --no-default-features --all-targets -- -D warnings
+      # BLE (off by default) needs D-Bus headers on Linux.
+      - name: install D-Bus headers
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - name: clippy (with BLE)
+        run: cargo clippy --locked --workspace --all-targets --features pb-core/ble -- -D warnings
 
   test:
     name: test (${{ matrix.os }})

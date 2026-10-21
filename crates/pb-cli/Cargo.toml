@@ -13,6 +13,8 @@ path = "src/main.rs"
 default = ["rtt"]
 # SEGGER RTT through debug probes (probe-rs).
 rtt = ["pb-core/rtt"]
+# BLE GATT (btleplug; needs D-Bus on Linux). Off by default.
+ble = ["pb-core/ble"]
 
 [dependencies]
 pb-core.workspace = true

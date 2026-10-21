@@ -12,6 +12,8 @@ parquet = ["dep:parquet", "dep:arrow-array", "dep:arrow-schema"]
 # SEGGER RTT through debug probes (probe-rs). On by default in the CLI and
 # GUI; off here so the library builds quickly without it.
 rtt = ["dep:probe-rs", "dep:object"]
+# BLE GATT through btleplug (needs D-Bus on Linux). Off by default.
+ble = ["dep:btleplug", "dep:tokio", "dep:futures-util", "dep:uuid"]
 
 [dependencies]
 arrow-array = { workspace = true, optional = true }
@@ -19,6 +21,10 @@ arrow-schema = { workspace = true, optional = true }
 parquet = { workspace = true, optional = true }
 probe-rs = { workspace = true, optional = true }
 object = { workspace = true, optional = true }
+btleplug = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
 base64.workspace = true
 chrono.workspace = true
 cobs.workspace = true

@@ -80,6 +80,10 @@ unsigned link_poll(uint8_t *buf, unsigned size) {      /* feed the result to the
 
 `NO_BLOCK_SKIP` drops a frame that does not fit rather than writing half of it, which a framer would then reject; `NO_BLOCK_TRIM` would cut frames. In Rust firmware, `rtt-target`'s `rtt_init!` declares the same two channels (up 0 "Terminal" and 1 "proto", down 1 "proto"). Profile: `rtt_up = 1`, `rtt_down = 1`, `rtt_text_channel = 0`.
 
+### Bluetooth LE (Nordic UART Service)
+
+Over BLE the firmware sends the same framed bytes it would send on a UART as notifications on the NUS TX characteristic (Zephyr's `bt_nus_send`, nRF5 SDK's `ble_nus_data_send`), in pieces of at most MTU − 3 bytes, and receives commands as writes on the NUS RX characteristic. Frames may be split across notifications and several may share one; the framer reassembles them, so keep COBS (or another framer) on this link.
+
 ### CAN with ISO-TP
 
 On CAN, set `type = "none"` as well: ISO-TP delimits each message. The firmware sends the encoded message (plus the optional CRC) as an ISO-TP payload with the identifier the host listens on (`rx_id` in the profile, 0x7E8 in the examples) and receives commands on the host's `tx_id` (0x7E0). Normal addressing, no extended addressing byte. When the host receives a first frame it answers with flow control `30 BS ST` from `isotp_block_size` and `isotp_st_min_us` (default `30 00 00`: send everything, no gap); when the host sends a long command it waits up to `isotp_timeout_ms` for the device's flow control and honours its block size and STmin (including the 100–900 µs codes `F1`–`F9`), WAIT frames, and overflow. Any ISO-TP library for the MCU works (for example isotp-c); on Linux the kernel's `CAN_ISOTP` sockets do too.

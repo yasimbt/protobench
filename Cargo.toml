@@ -44,6 +44,12 @@ socketcan = { version = "4", default-features = false }
 probe-rs = { version = "0.32", default-features = false, features = ["builtin-targets", "object"] }
 object = { version = "0.39", default-features = false, features = ["read_core", "elf", "std"] }
 pyo3 = { version = "0.30", features = ["abi3-py39", "extension-module"] }
+btleplug = "0.13"
+# Only for BLE: btleplug is async, so its transport runs a current-thread
+# runtime of its own.
+tokio = { version = "1", default-features = false, features = ["rt", "time"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+uuid = "1"
 rustls-pki-types = { version = "1.12", features = ["std"] }
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 rfd = "0.17.2"

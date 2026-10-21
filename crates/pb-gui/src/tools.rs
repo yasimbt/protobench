@@ -1207,6 +1207,43 @@ fn mqtt_fields(ui: &mut egui::Ui, pr: &mut ConnectionProfile, i: usize) {
     }
 }
 
+/// Grid rows of a BLE profile.
+fn ble_fields(ui: &mut egui::Ui, pr: &mut ConnectionProfile) {
+    ui.label("device name / address");
+    ui.horizontal(|ui| {
+        opt_text(ui, &mut pr.ble_name, "Sensor-7");
+        opt_text(ui, &mut pr.ble_address, "C0:FF:EE:12:34:56");
+    });
+    ui.end_row();
+    ui.label("service");
+    ui.text_edit_singleline(&mut pr.service);
+    ui.end_row();
+    ui.label("RX (host writes) / TX (notifies)");
+    ui.vertical(|ui| {
+        ui.text_edit_singleline(&mut pr.rx_char);
+        ui.text_edit_singleline(&mut pr.tx_char);
+    });
+    ui.end_row();
+    ui.label("");
+    if ui.button("Nordic UART Service").clicked() {
+        pr.service = pb_core::transport::ble::NUS_SERVICE.into();
+        pr.rx_char = pb_core::transport::ble::NUS_RX.into();
+        pr.tx_char = pb_core::transport::ble::NUS_TX.into();
+    }
+    ui.end_row();
+    ui.label("scan s / write with response");
+    ui.horizontal(|ui| {
+        ui.add(egui::DragValue::new(&mut pr.ble_scan_s).range(1..=120));
+        ui.checkbox(&mut pr.ble_write_response, "");
+    });
+    ui.end_row();
+    if !pb_core::transport::ble::SUPPORTED {
+        ui.label("");
+        ui.label(RichText::new("this build has no Bluetooth support (feature `ble`)").color(WARN));
+        ui.end_row();
+    }
+}
+
 /// Grid rows of an RTT profile.
 fn rtt_fields(ui: &mut egui::Ui, pr: &mut ConnectionProfile) {
     ui.label("chip");
@@ -1611,6 +1648,7 @@ pub fn project_editor(
                                 TransportKind::Mqtt => mqtt_fields(ui, pr, i),
                                 TransportKind::Can => can_fields(ui, pr, i),
                                 TransportKind::Rtt => rtt_fields(ui, pr),
+                                TransportKind::Ble => ble_fields(ui, pr),
                             }
                             ui.label("auto reconnect");
                             ui.checkbox(&mut pr.auto_reconnect, "");

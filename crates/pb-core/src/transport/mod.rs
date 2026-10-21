@@ -4,6 +4,7 @@
 //! most a few milliseconds, and `write_all`. New link types (RTT, BLE, CAN,
 //! MQTT) plug in by implementing the trait and adding a [`connector`] arm.
 
+pub mod ble;
 pub mod can;
 mod loopback;
 pub mod mqtt;
@@ -142,6 +143,7 @@ pub fn connector_for(
             TransportKind::Replay => p.file = Some(o),
             TransportKind::Mqtt => p.broker = o,
             TransportKind::Rtt => p.probe = Some(o),
+            TransportKind::Ble => p.ble_address = Some(o),
             TransportKind::Can => match p.can_backend {
                 crate::config::CanBackend::Slcan => p.port = o,
                 crate::config::CanBackend::Socketcan => p.interface = o,
@@ -177,6 +179,7 @@ pub fn connector_for(
         TransportKind::Mqtt => mqtt::connector(&p, project_dir)?,
         TransportKind::Can => can::connector(&p, project_dir)?,
         TransportKind::Rtt => rtt::connector(&p, project_dir)?,
+        TransportKind::Ble => ble::connector(&p)?,
         TransportKind::Replay => {
             let file = p
                 .file

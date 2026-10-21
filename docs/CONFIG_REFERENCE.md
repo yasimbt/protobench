@@ -46,7 +46,7 @@ One of `proto_files` or `descriptor_set` is required. `import "nanopb.proto";` a
 | Key | Type | Default | Used by | Meaning |
 |---|---|---|---|---|
 | `name` | string | `"default"` | all | Profile name (unique). |
-| `transport` | string | `"serial"` | all | `serial`, `tcp_client`, `tcp_server`, `udp`, `sim`, `replay`, `mqtt`, `can` or `rtt`. |
+| `transport` | string | `"serial"` | all | `serial`, `tcp_client`, `tcp_server`, `udp`, `sim`, `replay`, `mqtt`, `can`, `rtt` or `ble`. |
 | `port` | string | `"auto"` | serial | Port name (`COM5`, `/dev/ttyACM0`) or `"auto"`: the one port matching `usb_vid`, `usb_pid` and `usb_serial`. Without any of them, the only USB serial port (or the only port, when none is USB). Several matches are an error that lists them. |
 | `usb_vid` | integer | none | serial | USB vendor ID for `port = "auto"`. |
 | `usb_pid` | integer | none | serial | USB product ID for `port = "auto"`. |
@@ -100,6 +100,13 @@ One of `proto_files` or `descriptor_set` is required. `import "nanopb.proto";` a
 | `attach` | bool | `true` | rtt | Attach to the running core. `false` holds reset while attaching and restarts the firmware. |
 | `elf` | string | none | rtt | The firmware's ELF file, relative to the project: the `_SEGGER_RTT` symbol gives the control block's address. Without it RAM is scanned, which works but takes longer on chips with much RAM. |
 | `probe_speed_khz` | integer | probe default | rtt | SWD/JTAG clock. |
+| `ble_name` | string | none | ble | Advertised name of the device (exact). |
+| `ble_address` | string | none | ble | Bluetooth address, `AA:BB:CC:DD:EE:FF`; wins over `ble_name`. (macOS hides addresses: use the name there.) |
+| `service` | string | Nordic UART Service | ble | GATT service UUID: 128-bit, or a 16-bit SIG UUID such as `180d`. |
+| `rx_char` | string | NUS RX (`6e400002-…`) | ble | Characteristic the host writes commands to (the device's RX). |
+| `tx_char` | string | NUS TX (`6e400003-…`) | ble | Characteristic whose notifications carry the device's data (the device's TX). |
+| `ble_scan_s` | integer | `10` | ble | How long to look for the device when connecting. |
+| `ble_write_response` | bool | `false` | ble | Write with response (each chunk acknowledged) instead of without. |
 
 The `sim` transport runs the built-in simulator in-process. A `tcp_server` serves one client at a time and goes back to listening when it disconnects. An `mqtt` or `can` profile usually goes with `framing.type = "none"`, since every MQTT message or ISO-TP message is already one frame (a CRC is still possible).
 

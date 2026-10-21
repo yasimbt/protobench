@@ -162,6 +162,27 @@ pub fn list_ports(json: bool) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+pub fn ble_scan(seconds: u64, json: bool) -> Result<ExitCode> {
+    let devices = pb_core::transport::ble::scan(seconds)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&devices)?);
+    } else if devices.is_empty() {
+        println!("no Bluetooth LE devices found in {seconds} s");
+    } else {
+        println!("{:<20} {:>5}  {:<24} SERVICES", "ADDRESS", "RSSI", "NAME");
+        for d in devices {
+            println!(
+                "{:<20} {:>5}  {:<24} {}",
+                d.address,
+                d.rssi.map(|r| r.to_string()).unwrap_or_else(|| "-".into()),
+                d.name.as_deref().unwrap_or("-"),
+                d.services.join(" ")
+            );
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 pub fn list_probes(json: bool) -> Result<ExitCode> {
     use pb_core::transport::rtt;
     let probes = rtt::list_probes();

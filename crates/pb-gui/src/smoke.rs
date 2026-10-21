@@ -467,6 +467,12 @@ fn link_profiles() -> Vec<pb_core::config::ConnectionProfile> {
             rtt_text_channel: Some(0),
             ..Default::default()
         },
+        ConnectionProfile {
+            name: "wireless".into(),
+            transport: TransportKind::Ble,
+            ble_name: Some("Sensor-7".into()),
+            ..Default::default()
+        },
     ]
 }
 

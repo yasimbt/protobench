@@ -38,6 +38,15 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Scan for Bluetooth LE devices (builds with the `ble` feature).
+    BleScan {
+        /// How long to scan, in seconds.
+        #[arg(long, default_value_t = 5)]
+        seconds: u64,
+        /// Print JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// List debug probes (J-Link, ST-Link, CMSIS-DAP) for RTT profiles.
     ListProbes {
         /// Print JSON.
@@ -222,6 +231,7 @@ fn main() -> ExitCode {
     let r = match cli.command {
         Command::ListPorts { json } => cmd::list_ports(json),
         Command::ListProbes { json } => cmd::list_probes(json),
+        Command::BleScan { seconds, json } => cmd::ble_scan(seconds, json),
         Command::Schema { project, message } => cmd::schema(&project, message.as_deref()),
         Command::Send {
             project,

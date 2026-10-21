@@ -177,6 +177,8 @@ pub enum TransportKind {
     Can,
     /// SEGGER RTT through a debug probe.
     Rtt,
+    /// BLE GATT, a UART-style service (Nordic UART Service by default).
+    Ble,
 }
 
 /// How a transport delivers data, which decides the framing that suits it.
@@ -202,6 +204,7 @@ impl TransportKind {
         TransportKind::Mqtt,
         TransportKind::Can,
         TransportKind::Rtt,
+        TransportKind::Ble,
     ];
 
     /// The name used in `project.toml`.
@@ -216,6 +219,7 @@ impl TransportKind {
             TransportKind::Mqtt => "mqtt",
             TransportKind::Can => "can",
             TransportKind::Rtt => "rtt",
+            TransportKind::Ble => "ble",
         }
     }
 
@@ -225,7 +229,8 @@ impl TransportKind {
             TransportKind::Serial
             | TransportKind::TcpClient
             | TransportKind::TcpServer
-            | TransportKind::Rtt => LinkKind::Stream,
+            | TransportKind::Rtt
+            | TransportKind::Ble => LinkKind::Stream,
             TransportKind::Udp | TransportKind::Sim | TransportKind::Replay => LinkKind::Either,
             TransportKind::Mqtt | TransportKind::Can => LinkKind::Message,
         }
@@ -389,6 +394,20 @@ pub struct ConnectionProfile {
     pub elf: Option<String>,
     /// RTT: SWD/JTAG clock in kHz.
     pub probe_speed_khz: Option<u32>,
+    /// BLE: advertised name of the device.
+    pub ble_name: Option<String>,
+    /// BLE: device address (wins over `ble_name`).
+    pub ble_address: Option<String>,
+    /// BLE: GATT service UUID (Nordic UART Service by default).
+    pub service: String,
+    /// BLE: characteristic the host writes to (the device's RX).
+    pub rx_char: String,
+    /// BLE: characteristic that notifies the host (the device's TX).
+    pub tx_char: String,
+    /// BLE: how long to scan for the device, in seconds.
+    pub ble_scan_s: u64,
+    /// BLE: write with response (acknowledged) instead of without.
+    pub ble_write_response: bool,
 }
 
 /// CAN interfaces.
@@ -461,6 +480,13 @@ impl Default for ConnectionProfile {
             attach: true,
             elf: None,
             probe_speed_khz: None,
+            ble_name: None,
+            ble_address: None,
+            service: crate::transport::ble::NUS_SERVICE.into(),
+            rx_char: crate::transport::ble::NUS_RX.into(),
+            tx_char: crate::transport::ble::NUS_TX.into(),
+            ble_scan_s: 10,
+            ble_write_response: false,
         }
     }
 }
@@ -485,6 +511,13 @@ impl ConnectionProfile {
             TransportKind::Replay => {
                 format!("replay {}", self.file.as_deref().unwrap_or("(no file)"))
             }
+            TransportKind::Ble => format!(
+                "ble {}",
+                self.ble_address
+                    .as_deref()
+                    .or(self.ble_name.as_deref())
+                    .unwrap_or("(no device)")
+            ),
             TransportKind::Rtt => format!(
                 "rtt {} via {}",
                 if self.chip.is_empty() {

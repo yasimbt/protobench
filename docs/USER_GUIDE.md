@@ -98,6 +98,25 @@ On Linux the probe needs USB access (a udev rule, as for any probe-rs tool); on 
 
 If you already run a J-Link GDB server or OpenOCD, their RTT servers work too, with no probe access needed by ProtoBench: a `tcp_client` profile to port 19021 (J-Link) or to the port OpenOCD's `rtt server start` opened gives you the channel as a TCP stream. J-Link prints a short banner when you connect; with text passthrough on it lands in the text console.
 
+### Bluetooth LE
+
+Wireless sensors that expose a UART-style GATT service, most often Nordic's UART Service (NUS, the default), connect with a `ble` profile:
+
+```toml
+[[connection.profiles]]
+name = "wireless"
+transport = "ble"
+ble_name = "Sensor-7"            # or ble_address = "C0:FF:EE:12:34:56"
+# service / rx_char / tx_char default to the Nordic UART Service
+
+[framing]
+type = "cobs"                    # notifications are pieces of a byte stream
+```
+
+The host writes commands to `rx_char` and receives notifications from `tx_char`; together they are a byte stream, so keep a framer. Writes are split to the negotiated ATT MTU (20 bytes per chunk on a default link, up to 244 with a larger MTU). A device that disconnects or is power-cycled is found again by the reconnect logic, which scans for it for up to `ble_scan_s`. `protobench ble-scan` lists devices in range with their signal strength and services.
+
+Bluetooth is a cargo feature, off by default because it needs the platform stack at build time on Linux: build with `cargo build --release -p pb-cli -p pb-gui --features ble` (on Linux install `libdbus-1-dev` and `pkg-config` first; BlueZ must be running). Without it, `ble` profiles report that the build has no Bluetooth support.
+
 ### CAN
 
 CAN-only devices connect through an slcan adapter (a CANable, USBtin or CANtact with slcan firmware, about any USB CAN stick) on any OS, or through a Linux SocketCAN interface:
@@ -345,6 +364,7 @@ Scripts are sandboxed: no file, network or module access, at most 50 million ope
 ```
 protobench list-ports [--json]
 protobench list-probes [--json]
+protobench ble-scan    [--seconds <s>] [--json]   (builds with --features ble)
 protobench schema   --project <dir> [--message <type>]
 protobench send     --project <dir> [--device <name>] [--profile <name>] [--port <p>] --command <name> [--set field=value ...] [--wait]
 protobench monitor  --project <dir> [--profile [<device>=]<name>]... [--port [<device>=]<p>]... [--only <devices>]
@@ -360,6 +380,7 @@ protobench sim      --project <dir> [--tcp <port>] [--bind <addr>] | [--mqtt <br
 
 - `list-ports` prints ports with USB VID:PID, serial numbers and product names (`--json` for scripts).
 - `list-probes` prints the debug probes RTT profiles can use, with the `VID:PID:SERIAL` to put in `probe`.
+- `ble-scan` lists Bluetooth LE devices in range (address, signal strength, name, services); the binary needs the `ble` feature.
 - `schema` prints messages, fields with numbers, types and comments, and enums.
 - `send` sends one command. `--set millivolts=300` overrides payload fields (values in TOML syntax). Without `--wait` it is fire-and-forget; with it, the reply is printed as JSON and the exit code is 1 on timeout or error.
 - `monitor` prints decoded messages and text lines (`--json`: one object per line), or with `--channels` the latest channel values whenever they change. `--send` sends commands after connecting; `--duration` stops after N seconds; `--record` writes a session file. `--foxglove 8765` also serves the session to Foxglove (see *Foxglove server*), on `127.0.0.1` unless `--foxglove-bind 0.0.0.0`. With a `tcp_server` profile, `monitor`, `send` and `run` wait for the client to connect.

@@ -76,6 +76,31 @@ TLS checks the broker's certificate against the operating system's root store; `
 
 `protobench sim --project . --mqtt localhost:1883` runs the project's simulator as an MQTT device on a broker: it subscribes to the first mqtt profile's `publish` topic and publishes to its first `subscribe` filter (with `+`/`#` replaced by `sim`), so `run --profile cloud --port localhost:1883` works end to end without hardware. `--profile` picks another mqtt profile. A local broker is a one-liner, e.g. `mosquitto -p 1883`; ProtoBench's own tests use a small built-in broker.
 
+### CAN
+
+CAN-only devices connect through an slcan adapter (a CANable, USBtin or CANtact with slcan firmware, about any USB CAN stick) on any OS, or through a Linux SocketCAN interface:
+
+```toml
+[[connection.profiles]]
+name = "can"
+transport = "can"
+can_backend = "slcan"     # or "socketcan" with interface = "can0"
+port = "auto"             # the adapter's serial port
+usb_vid = 0xad50          # CANable (candleLight boards enumerate as 1d50:606f)
+bitrate = 500000
+tx_id = 0x7E0             # the host sends with this identifier
+rx_id = 0x7E8             # the device answers with this one
+
+[framing]
+type = "none"             # one ISO-TP message = one frame
+```
+
+Messages are segmented with ISO-TP (ISO 15765-2): a message of up to 7 bytes travels in one frame, a longer one as a first frame, the receiver's flow control and consecutive frames (up to 4095 bytes on classic CAN, more with the 32-bit first frame). `fd = true` uses CAN FD frames, so most protobuf messages fit in one 64-byte frame; `data_bitrate` turns on bit-rate switching. With `isotp = false` every CAN frame is one message, for devices that keep their messages under 8 (or 64) bytes. `isotp_block_size`, `isotp_st_min_us` and `isotp_padding` match what the firmware expects; the defaults (no block limit, no gap, no padding) suit most.
+
+Wiring: the adapter's CAN_H and CAN_L to the bus, a common ground, and a 120 Ω terminator at each end of the bus (many adapters have one you can switch on). The adapter takes care of the bit timing; the bit rate must match the device's.
+
+`protobench sim --project . --can-slcan /dev/pts/5` runs the simulator behind an emulated slcan adapter on a serial port, typically one end of a virtual serial pair (`socat pty,raw,echo=0,link=/tmp/a pty,raw,echo=0,link=/tmp/b` on Linux and macOS, com0com on Windows), with the first can profile's identifiers swapped round. Run `protobench run --profile can --port /tmp/b` against the other end.
+
 ## Multiple devices
 
 A project can connect several different devices at once: the board under test plus a reference meter, a power supply with a protobuf interface, or a second board. Each device is a project folder of its own (its own `.proto`, framing, commands, telemetry and simulator), and the main project lists the others:
@@ -307,7 +332,7 @@ protobench run      --project <dir> --sequence <name> [--profile [<device>=]<nam
 protobench check    --project <dir> [--json]
 protobench decode   <file.pbsession> [--json] [--csv out.csv] [--parquet out.parquet] [--mcap out.mcap]
                     [--channels a,b] [--range <t0>:<t1>] [--per-channel]
-protobench sim      --project <dir> [--tcp <port>] [--bind <addr>] | [--mqtt <broker> [--profile <name>]]
+protobench sim      --project <dir> [--tcp <port>] [--bind <addr>] | [--mqtt <broker> | --can-slcan <port>] [--profile <name>]
 ```
 
 - `list-ports` prints ports with USB VID:PID, serial numbers and product names (`--json` for scripts).
@@ -317,7 +342,7 @@ protobench sim      --project <dir> [--tcp <port>] [--bind <addr>] | [--mqtt <br
 - `run` runs a sequence headlessly and writes `<sequence>_<timestamp>.json` and `.xml` to `--report-dir` (default `<project>/reports`). Exit codes: **0** all steps passed, **1** a step failed, **2** configuration or connection error. `--non-interactive` decides what `prompt_operator` does (default: the sequence's `non_interactive`, else `fail`). `--port` overrides the profile's port, so the same sequence runs on any test station: `protobench run --project . --sequence smoke --profile usb --port COM5`. `--var load_ohms=4700` sets a variable, overriding `[vars]` (repeatable; values in TOML syntax like `send --set`, so `--var name='"abc"'` is a string and a value that is not valid TOML is taken as a string). It also answers `prompt_operator` inputs with the same `var`, so a sequence that asks for measured values runs unattended.
 - `check` checks a project without connecting: `project.toml`, the schema, every sequence (commands, messages, assertion and `save` paths, channels, statistics, scripts that do not compile, `${vars}` nothing defines) and the channels in `layout.json`. Findings print as `file:line: error|warning: message`; the exit code is **1** if there is any error, **0** otherwise, so it fits a CI step.
 - `decode` prints a recording (`--json`: one object per record), or exports its channels to CSV or Parquet and its messages to MCAP. `--channels` limits the export to some channels, `--range 12.5:20` to a time window in seconds (either side may be empty), and `--per-channel` writes one CSV per channel.
-- `sim` runs the project's simulator as a TCP server (default port 9000). Point a `tcp_client` profile at it to test the real network path. With `--mqtt <broker>` it acts as an MQTT device instead (see *MQTT*).
+- `sim` runs the project's simulator as a TCP server (default port 9000). Point a `tcp_client` profile at it to test the real network path. With `--mqtt <broker>` it acts as an MQTT device instead (see *MQTT*), and with `--can-slcan <port>` as a CAN device behind an emulated slcan adapter (see *CAN*).
 
 With `[[devices]]` (see *Multiple devices*), `monitor` and `run` start every device; `--only main` (comma-separated names) starts only some. `--profile` and `--port` take `DEVICE=VALUE` for another device and a bare value for `main`: `protobench run --project . --sequence compare --profile usb --profile ref=usb --port ref=COM7`. `send --device ref` connects only that device, and there a bare `--profile`/`--port` is the target's own. `monitor` tags other devices' output (`ref:reading`, and `"device": "ref"` in JSON) and `--send "ref:Start Stream"` sends to one of them.
 

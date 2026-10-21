@@ -1207,6 +1207,102 @@ fn mqtt_fields(ui: &mut egui::Ui, pr: &mut ConnectionProfile, i: usize) {
     }
 }
 
+/// A hex text field for an optional CAN identifier.
+fn hex_u32_edit(ui: &mut egui::Ui, v: &mut Option<u32>) {
+    let mut text = v.map(|x| format!("{x:X}")).unwrap_or_default();
+    if ui
+        .add(
+            egui::TextEdit::singleline(&mut text)
+                .desired_width(80.0)
+                .hint_text("7E0"),
+        )
+        .changed()
+    {
+        let t = text.trim().trim_start_matches("0x");
+        *v = if t.is_empty() {
+            None
+        } else {
+            u32::from_str_radix(t, 16).ok().or(*v)
+        };
+    }
+}
+
+/// Grid rows of a CAN profile.
+fn can_fields(ui: &mut egui::Ui, pr: &mut ConnectionProfile, i: usize) {
+    use pb_core::config::CanBackend;
+    ui.label("backend");
+    ui.horizontal(|ui| {
+        ui.radio_value(&mut pr.can_backend, CanBackend::Slcan, "slcan adapter");
+        ui.radio_value(&mut pr.can_backend, CanBackend::Socketcan, "SocketCAN");
+    });
+    ui.end_row();
+    match pr.can_backend {
+        CanBackend::Slcan => {
+            ui.label("adapter port");
+            ui.horizontal(|ui| {
+                ui.text_edit_singleline(&mut pr.port);
+                ui.menu_button("▾", |ui| port_menu(ui, pr));
+            });
+            ui.end_row();
+            ui.label("bit rate");
+            egui::ComboBox::from_id_salt(("canrate", i))
+                .selected_text(format!("{} kbit/s", pr.bitrate / 1000))
+                .show_ui(ui, |ui| {
+                    for r in [
+                        10_000, 20_000, 50_000, 100_000, 125_000, 250_000, 500_000, 800_000,
+                        1_000_000,
+                    ] {
+                        ui.selectable_value(&mut pr.bitrate, r, format!("{} kbit/s", r / 1000));
+                    }
+                });
+            ui.end_row();
+        }
+        CanBackend::Socketcan => {
+            ui.label("interface");
+            ui.add(egui::TextEdit::singleline(&mut pr.interface).hint_text("can0"));
+            ui.end_row();
+        }
+    }
+    ui.label("tx id / rx id (hex)");
+    ui.horizontal(|ui| {
+        hex_u32_edit(ui, &mut pr.tx_id);
+        hex_u32_edit(ui, &mut pr.rx_id);
+        ui.checkbox(&mut pr.extended_id, "29-bit");
+    });
+    ui.end_row();
+    ui.label("CAN FD");
+    ui.horizontal(|ui| {
+        ui.checkbox(&mut pr.fd, "");
+        if pr.fd {
+            let mut brs = pr.data_bitrate.is_some();
+            if ui.checkbox(&mut brs, "bit-rate switch").changed() {
+                pr.data_bitrate = brs.then_some(2_000_000);
+            }
+            if let Some(d) = pr.data_bitrate.as_mut() {
+                egui::ComboBox::from_id_salt(("datarate", i))
+                    .selected_text(format!("{} Mbit/s", *d / 1_000_000))
+                    .show_ui(ui, |ui| {
+                        for r in [1_000_000, 2_000_000, 4_000_000, 5_000_000, 8_000_000] {
+                            ui.selectable_value(d, r, format!("{} Mbit/s", r / 1_000_000));
+                        }
+                    });
+            }
+        }
+    });
+    ui.end_row();
+    ui.label("ISO-TP");
+    ui.checkbox(&mut pr.isotp, "segment long messages");
+    ui.end_row();
+    if pr.isotp {
+        ui.label("block size / STmin µs");
+        ui.horizontal(|ui| {
+            ui.add(egui::DragValue::new(&mut pr.isotp_block_size));
+            ui.add(egui::DragValue::new(&mut pr.isotp_st_min_us).range(0..=127_000));
+        });
+        ui.end_row();
+    }
+}
+
 /// A warning when the framing does not suit the link (the same rule as
 /// `protobench check`).
 fn framing_hint(t: TransportKind, framing: FramingType) -> Option<&'static str> {
@@ -1461,6 +1557,7 @@ pub fn project_editor(
                                 }
                                 TransportKind::Sim => {}
                                 TransportKind::Mqtt => mqtt_fields(ui, pr, i),
+                                TransportKind::Can => can_fields(ui, pr, i),
                             }
                             ui.label("auto reconnect");
                             ui.checkbox(&mut pr.auto_reconnect, "");

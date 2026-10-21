@@ -422,6 +422,83 @@ fn validate_profile(p: &ConnectionProfile, i: usize, framing: &FramingConfig, f:
                 );
             }
         }
+        TransportKind::Can => {
+            let max_id = if p.extended_id { 0x1FFF_FFFF } else { 0x7FF };
+            for (k, v) in [("tx_id", p.tx_id), ("rx_id", p.rx_id)] {
+                match v {
+                    None => f.err(
+                        key_path!["connection", "profiles", i],
+                        format!("can needs `{k}` (the CAN identifier, e.g. 0x7E0)"),
+                    ),
+                    Some(id) if id > max_id => f.err(
+                        at(k),
+                        format!(
+                            "{k} {id:#x} does not fit {} identifiers{}",
+                            if p.extended_id { "29-bit" } else { "11-bit" },
+                            if p.extended_id {
+                                ""
+                            } else {
+                                " (set extended_id = true)"
+                            }
+                        ),
+                    ),
+                    _ => {}
+                }
+            }
+            if p.tx_id.is_some() && p.tx_id == p.rx_id {
+                f.err(at("rx_id"), "tx_id and rx_id must differ".into());
+            }
+            match p.can_backend {
+                CanBackend::Slcan => {
+                    if p.port.trim().is_empty() {
+                        f.err(
+                            at("port"),
+                            "slcan needs `port` (the adapter's serial port)".into(),
+                        );
+                    }
+                    if crate::transport::can::slcan::bitrate_code(p.bitrate).is_none() {
+                        f.err(
+                            at("bitrate"),
+                            format!(
+                                "slcan adapters take 10k, 20k, 50k, 100k, 125k, 250k, 500k, 800k or 1M bit/s, not {}",
+                                p.bitrate
+                            ),
+                        );
+                    }
+                    if let Some(d) = p.data_bitrate {
+                        if crate::transport::can::slcan::data_bitrate_code(d).is_none() {
+                            f.err(
+                                at("data_bitrate"),
+                                format!("slcan data bit rates are 1M, 2M, 4M, 5M or 8M, not {d}"),
+                            );
+                        }
+                    }
+                }
+                CanBackend::Socketcan => {
+                    if p.interface.trim().is_empty() {
+                        f.err(
+                            at("interface"),
+                            "socketcan needs `interface` (e.g. can0)".into(),
+                        );
+                    }
+                    if !cfg!(target_os = "linux") {
+                        f.warn(at("can_backend"), "SocketCAN is Linux only".into());
+                    }
+                }
+            }
+            if p.data_bitrate.is_some() && !p.fd {
+                f.warn(
+                    at("data_bitrate"),
+                    "data_bitrate is only used with fd = true".into(),
+                );
+            }
+            if p.isotp_st_min_us > 127_000 {
+                f.err(
+                    at("isotp_st_min_us"),
+                    "isotp_st_min_us must be at most 127000".into(),
+                );
+            }
+        }
         TransportKind::Replay => {
             if p.file.as_deref().is_none_or(|x| x.trim().is_empty()) {
                 f.err(
@@ -582,6 +659,16 @@ mod tests {
                 p.qos = 2;
             }),
             bad(TransportKind::Mqtt, &|_| {}),
+            bad(TransportKind::Can, &|p| {
+                p.tx_id = Some(0x900);
+                p.bitrate = 333_000;
+            }),
+            bad(TransportKind::Can, &|p| {
+                p.tx_id = Some(0x10);
+                p.rx_id = Some(0x10);
+                p.can_backend = CanBackend::Socketcan;
+                p.interface = String::new();
+            }),
         ];
         let f = profile_findings(&c);
         let has =
@@ -624,6 +711,26 @@ mod tests {
             "{f:#?}"
         );
         assert!(has("connection.profiles[5]", "needs `subscribe`"), "{f:#?}");
+        assert!(has("connection.profiles[6]", "can needs `rx_id`"), "{f:#?}");
+        assert!(
+            has(
+                "connection.profiles[6].tx_id",
+                "does not fit 11-bit identifiers"
+            ),
+            "{f:#?}"
+        );
+        assert!(
+            has("connection.profiles[6].bitrate", "slcan adapters take"),
+            "{f:#?}"
+        );
+        assert!(has("connection.profiles[7].rx_id", "must differ"), "{f:#?}");
+        assert!(
+            has(
+                "connection.profiles[7].interface",
+                "socketcan needs `interface`"
+            ),
+            "{f:#?}"
+        );
         // Sim and tcp_server need nothing beyond their defaults.
         c.connection.profiles = vec![
             bad(TransportKind::Sim, &|_| {}),

@@ -596,3 +596,25 @@ pub fn sim_mqtt(dir: &Path, broker: &str, profile: Option<&str>) -> Result<ExitC
     let _ = t.join();
     Ok(ExitCode::SUCCESS)
 }
+
+pub fn sim_can(dir: &Path, port: &str, profile: Option<&str>) -> Result<ExitCode> {
+    let p = open_project(dir)?;
+    let host = pb_sim::can::can_profile(&p, profile)?;
+    let serial = pb_core::config::ConnectionProfile {
+        port: port.to_string(),
+        auto_reconnect: false,
+        ..host.clone()
+    };
+    let link = pb_core::transport::SerialTransport::open(&serial)?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let t = pb_sim::can::spawn_slcan_device(&p, &host, Box::new(link), stop)
+        .with_context(|| format!("simulator on {port}"))?;
+    eprintln!(
+        "simulator for `{}` behind an emulated slcan adapter on {port}: listens on {:#x}, answers on {:#x} (Ctrl-C to stop)",
+        p.config.name,
+        host.tx_id.unwrap_or_default(),
+        host.rx_id.unwrap_or_default(),
+    );
+    let _ = t.join();
+    Ok(ExitCode::SUCCESS)
+}

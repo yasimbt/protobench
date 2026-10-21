@@ -55,6 +55,19 @@ Every transport read is one frame: one UDP datagram, for example. The CRC, if co
 
 On a link that carries whole messages, such as MQTT, set `type = "none"`: the MQTT payload is exactly what goes between the delimiters on a serial line, the codec bytes plus the optional CRC, with no COBS, SLIP or length prefix. The firmware publishes one encoded message per MQTT PUBLISH to the topic ProtoBench subscribes to, and decodes each PUBLISH it receives on the command topic as one message.
 
+### CAN with ISO-TP
+
+On CAN, set `type = "none"` as well: ISO-TP delimits each message. The firmware sends the encoded message (plus the optional CRC) as an ISO-TP payload with the identifier the host listens on (`rx_id` in the profile, 0x7E8 in the examples) and receives commands on the host's `tx_id` (0x7E0). Normal addressing, no extended addressing byte. When the host receives a first frame it answers with flow control `30 BS ST` from `isotp_block_size` and `isotp_st_min_us` (default `30 00 00`: send everything, no gap); when the host sends a long command it waits up to `isotp_timeout_ms` for the device's flow control and honours its block size and STmin (including the 100–900 µs codes `F1`–`F9`), WAIT frames, and overflow. Any ISO-TP library for the MCU works (for example isotp-c); on Linux the kernel's `CAN_ISOTP` sockets do too.
+
+```text
+host → device, Ping (`08 01 12 00` plus CRC `22 53`, see the worked examples), one frame:
+  id 0x7E0  06 08 01 12 00 22 53
+device → host, 47-byte telemetry, classic CAN:
+  id 0x7E8  10 2F d0 d1 d2 d3 d4 d5      first frame, length 0x02F
+  id 0x7E0  30 00 00                     flow control from the host
+  id 0x7E8  21 d6 … d12                  consecutive frames 1, 2, …
+```
+
 ### Text passthrough
 
 With `text_passthrough = true`, firmware can print log lines on the same UART as the frames. A line is the bytes before a `\n` that start with a printable character (0x21–0x7E) and contain only printable ASCII, tab or CR. It goes to the text console instead of the framer. Rules:

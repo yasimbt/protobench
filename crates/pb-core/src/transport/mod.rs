@@ -4,6 +4,7 @@
 //! most a few milliseconds, and `write_all`. New link types (RTT, BLE, CAN,
 //! MQTT) plug in by implementing the trait and adding a [`connector`] arm.
 
+pub mod can;
 mod loopback;
 pub mod mqtt;
 mod net;
@@ -36,8 +37,9 @@ pub trait Transport: Send {
     /// `Ok(0)` means nothing arrived; an error means the link is gone.
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize>;
     /// Writes all bytes, blocking at most about [`WRITE_TIMEOUT`]. An error of
-    /// kind `TimedOut`, `WouldBlock` or `NotConnected` fails only this write;
-    /// any other error means the link is gone.
+    /// kind `TimedOut`, `WouldBlock`, `NotConnected`, `InvalidInput` or
+    /// `InvalidData` fails only this write; any other error means the link
+    /// is gone.
     fn write_all(&mut self, data: &[u8]) -> io::Result<()>;
     /// Sets DTR (serial only).
     fn set_dtr(&mut self, _on: bool) -> io::Result<()> {
@@ -138,6 +140,10 @@ pub fn connector_for(
             TransportKind::Udp => p.target = Some(o),
             TransportKind::Replay => p.file = Some(o),
             TransportKind::Mqtt => p.broker = o,
+            TransportKind::Can => match p.can_backend {
+                crate::config::CanBackend::Slcan => p.port = o,
+                crate::config::CanBackend::Socketcan => p.interface = o,
+            },
             TransportKind::Sim => {}
         }
     }
@@ -167,6 +173,7 @@ pub fn connector_for(
             Box::new(move || f())
         }
         TransportKind::Mqtt => mqtt::connector(&p, project_dir)?,
+        TransportKind::Can => can::connector(&p, project_dir)?,
         TransportKind::Replay => {
             let file = p
                 .file

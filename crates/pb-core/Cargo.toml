@@ -41,5 +41,8 @@ tracing.workspace = true
 tungstenite.workspace = true
 miette.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+socketcan.workspace = true
+
 [dev-dependencies]
 proptest.workspace = true

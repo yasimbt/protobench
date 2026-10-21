@@ -747,7 +747,13 @@ impl WriteError {
         use std::io::ErrorKind::*;
         WriteError {
             message: e.to_string(),
-            lost: !matches!(e.kind(), TimedOut | WouldBlock | NotConnected),
+            // A write that timed out, found no peer, or was refused (too
+            // long for the link, the receiver cannot take it) fails only
+            // that request.
+            lost: !matches!(
+                e.kind(),
+                TimedOut | WouldBlock | NotConnected | InvalidInput | InvalidData
+            ),
         }
     }
 }

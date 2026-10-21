@@ -173,6 +173,8 @@ pub enum TransportKind {
     Replay,
     /// MQTT 3.1.1 through a broker: one message per PUBLISH.
     Mqtt,
+    /// CAN or CAN FD, with ISO-TP: an slcan adapter or SocketCAN.
+    Can,
 }
 
 /// How a transport delivers data, which decides the framing that suits it.
@@ -196,6 +198,7 @@ impl TransportKind {
         TransportKind::Sim,
         TransportKind::Replay,
         TransportKind::Mqtt,
+        TransportKind::Can,
     ];
 
     /// The name used in `project.toml`.
@@ -208,6 +211,7 @@ impl TransportKind {
             TransportKind::Sim => "sim",
             TransportKind::Replay => "replay",
             TransportKind::Mqtt => "mqtt",
+            TransportKind::Can => "can",
         }
     }
 
@@ -218,7 +222,7 @@ impl TransportKind {
                 LinkKind::Stream
             }
             TransportKind::Udp | TransportKind::Sim | TransportKind::Replay => LinkKind::Either,
-            TransportKind::Mqtt => LinkKind::Message,
+            TransportKind::Mqtt | TransportKind::Can => LinkKind::Message,
         }
     }
 }
@@ -334,6 +338,45 @@ pub struct ConnectionProfile {
     pub publish: Option<String>,
     /// MQTT QoS for publishing and subscribing: 0 or 1.
     pub qos: u8,
+    /// CAN backend: an slcan adapter on `port`, or a SocketCAN interface.
+    pub can_backend: CanBackend,
+    /// SocketCAN interface, e.g. `can0`.
+    pub interface: String,
+    /// CAN bit rate (set on slcan adapters; SocketCAN interfaces are set up
+    /// by the OS).
+    pub bitrate: u32,
+    /// CAN FD data-phase bit rate (slcan `Y` command); turns on bit-rate
+    /// switching.
+    pub data_bitrate: Option<u32>,
+    /// CAN identifier the host sends with.
+    pub tx_id: Option<u32>,
+    /// CAN identifier the device answers with.
+    pub rx_id: Option<u32>,
+    /// 29-bit CAN identifiers.
+    pub extended_id: bool,
+    /// CAN FD frames (up to 64 bytes).
+    pub fd: bool,
+    /// ISO-TP segmentation; without it every CAN frame is one message.
+    pub isotp: bool,
+    /// ISO-TP block size asked for when receiving (0 = no limit).
+    pub isotp_block_size: u8,
+    /// ISO-TP minimum frame separation asked for when receiving, in µs.
+    pub isotp_st_min_us: u32,
+    /// Pad CAN frames to full length with this byte.
+    pub isotp_padding: Option<u8>,
+    /// ISO-TP timeout for flow control and consecutive frames (N_Bs, N_Cr).
+    pub isotp_timeout_ms: u64,
+}
+
+/// CAN interfaces.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CanBackend {
+    /// An slcan (Lawicel ASCII) adapter on a serial port.
+    #[default]
+    Slcan,
+    /// A Linux SocketCAN interface.
+    Socketcan,
 }
 
 impl Default for ConnectionProfile {
@@ -374,6 +417,19 @@ impl Default for ConnectionProfile {
             subscribe: Vec::new(),
             publish: None,
             qos: 0,
+            can_backend: CanBackend::Slcan,
+            interface: "can0".into(),
+            bitrate: 500_000,
+            data_bitrate: None,
+            tx_id: None,
+            rx_id: None,
+            extended_id: false,
+            fd: false,
+            isotp: true,
+            isotp_block_size: 0,
+            isotp_st_min_us: 0,
+            isotp_padding: None,
+            isotp_timeout_ms: 1000,
         }
     }
 }
@@ -397,6 +453,22 @@ impl ConnectionProfile {
             TransportKind::Sim => "simulator (loopback)".into(),
             TransportKind::Replay => {
                 format!("replay {}", self.file.as_deref().unwrap_or("(no file)"))
+            }
+            TransportKind::Can => {
+                let ids = match (self.tx_id, self.rx_id) {
+                    (Some(t), Some(r)) => format!(" tx {t:#x} rx {r:#x}"),
+                    _ => String::new(),
+                };
+                match self.can_backend {
+                    CanBackend::Slcan => {
+                        format!(
+                            "can slcan {} @ {} kbit/s{ids}",
+                            self.port,
+                            self.bitrate / 1000
+                        )
+                    }
+                    CanBackend::Socketcan => format!("can {}{ids}", self.interface),
+                }
             }
             TransportKind::Mqtt => format!(
                 "mqtt{}://{}",

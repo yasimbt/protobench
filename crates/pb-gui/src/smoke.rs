@@ -440,15 +440,27 @@ impl Script {
 /// Profiles of the newer links, opened in the project editor.
 fn link_profiles() -> Vec<pb_core::config::ConnectionProfile> {
     use pb_core::config::{ConnectionProfile, TransportKind};
-    vec![ConnectionProfile {
-        name: "broker".into(),
-        transport: TransportKind::Mqtt,
-        broker: "localhost:1883".into(),
-        subscribe: vec!["dev/+/up".into()],
-        publish: Some("dev/1/down".into()),
-        tls: true,
-        ..Default::default()
-    }]
+    vec![
+        ConnectionProfile {
+            name: "broker".into(),
+            transport: TransportKind::Mqtt,
+            broker: "localhost:1883".into(),
+            subscribe: vec!["dev/+/up".into()],
+            publish: Some("dev/1/down".into()),
+            tls: true,
+            ..Default::default()
+        },
+        ConnectionProfile {
+            name: "bus".into(),
+            transport: TransportKind::Can,
+            port: "auto".into(),
+            tx_id: Some(0x7E0),
+            rx_id: Some(0x7E8),
+            fd: true,
+            data_bitrate: Some(2_000_000),
+            ..Default::default()
+        },
+    ]
 }
 
 fn smoke_csv_path() -> PathBuf {

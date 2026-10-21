@@ -7,6 +7,7 @@
 //! It runs over the in-process loopback ([`sim_factory`]) or as a TCP server
 //! ([`run_tcp_server`]).
 
+pub mod can;
 pub mod generators;
 pub mod mqtt;
 

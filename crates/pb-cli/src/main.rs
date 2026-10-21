@@ -194,7 +194,12 @@ enum Command {
         /// with the topics of an mqtt profile swapped round.
         #[arg(long, value_name = "BROKER")]
         mqtt: Option<String>,
-        /// The mqtt profile whose topics to use (default: the first one).
+        /// Act as a CAN device behind an emulated slcan adapter on this
+        /// serial port (one end of a virtual serial pair), with the
+        /// identifiers of a can profile swapped round.
+        #[arg(long, value_name = "PORT", conflicts_with = "mqtt")]
+        can_slcan: Option<String>,
+        /// The mqtt or can profile to use (default: the first one).
         #[arg(long)]
         profile: Option<String>,
     },
@@ -304,10 +309,12 @@ fn main() -> ExitCode {
             tcp,
             bind,
             mqtt,
+            can_slcan,
             profile,
-        } => match mqtt {
-            Some(broker) => cmd::sim_mqtt(&project, &broker, profile.as_deref()),
-            None => cmd::sim(&project, &bind, tcp),
+        } => match (mqtt, can_slcan) {
+            (Some(broker), _) => cmd::sim_mqtt(&project, &broker, profile.as_deref()),
+            (None, Some(port)) => cmd::sim_can(&project, &port, profile.as_deref()),
+            (None, None) => cmd::sim(&project, &bind, tcp),
         },
     };
     match r {

@@ -46,7 +46,7 @@ One of `proto_files` or `descriptor_set` is required. `import "nanopb.proto";` a
 | Key | Type | Default | Used by | Meaning |
 |---|---|---|---|---|
 | `name` | string | `"default"` | all | Profile name (unique). |
-| `transport` | string | `"serial"` | all | `serial`, `tcp_client`, `tcp_server`, `udp`, `sim`, `replay` or `mqtt`. |
+| `transport` | string | `"serial"` | all | `serial`, `tcp_client`, `tcp_server`, `udp`, `sim`, `replay`, `mqtt` or `can`. |
 | `port` | string | `"auto"` | serial | Port name (`COM5`, `/dev/ttyACM0`) or `"auto"`: the one port matching `usb_vid`, `usb_pid` and `usb_serial`. Without any of them, the only USB serial port (or the only port, when none is USB). Several matches are an error that lists them. |
 | `usb_vid` | integer | none | serial | USB vendor ID for `port = "auto"`. |
 | `usb_pid` | integer | none | serial | USB product ID for `port = "auto"`. |
@@ -79,8 +79,21 @@ One of `proto_files` or `descriptor_set` is required. `import "nanopb.proto";` a
 | `tls` | bool | `false` | mqtt | TLS, verified against the operating system's root certificates. |
 | `tls_ca` | string | none | mqtt | Extra CA certificate(s) to trust, PEM, relative to the project (a private broker). |
 | `tls_cert`, `tls_key` | string | none | mqtt | Client certificate and key, PEM, for brokers that require mutual TLS (AWS IoT, for example). |
+| `can_backend` | string | `"slcan"` | can | `slcan`: a Lawicel ASCII adapter (CANable, USBtin, CANtact) on the serial port in `port` (with `usb_vid`/`usb_pid`/`usb_serial` for `"auto"`). `socketcan`: a Linux SocketCAN interface. |
+| `interface` | string | `"can0"` | can | SocketCAN interface. Its bit rate is set by the OS (`ip link set can0 type can bitrate 500000`). |
+| `bitrate` | integer | `500000` | can | Bit rate set on an slcan adapter: 10k, 20k, 50k, 100k, 125k, 250k, 500k, 800k or 1M. |
+| `data_bitrate` | integer | none | can | CAN FD data-phase bit rate on an slcan adapter (1M, 2M, 4M, 5M or 8M, CANable 2.0 codes); turns on bit-rate switching. |
+| `tx_id` | integer | required | can | Identifier the host sends with (`0x7E0`). |
+| `rx_id` | integer | required | can | Identifier the device answers with (`0x7E8`); frames with other identifiers are ignored. |
+| `extended_id` | bool | `false` | can | 29-bit identifiers. |
+| `fd` | bool | `false` | can | CAN FD frames (up to 64 bytes). |
+| `isotp` | bool | `true` | can | ISO-TP (ISO 15765-2) segmentation, so messages may be longer than a frame. Without it every frame is one message (8 or 64 bytes at most). |
+| `isotp_block_size` | integer | `0` | can | Block size the host asks for when receiving (0 = send everything after one flow control). |
+| `isotp_st_min_us` | integer | `0` | can | Minimum gap between consecutive frames the host asks for, in µs (100 µs steps below 1 ms, then ms, up to 127000). |
+| `isotp_padding` | integer | none | can | Pad frames to full length with this byte (some ECUs require 0x55 or 0xAA). FD frames above 8 bytes are always padded to a valid length. |
+| `isotp_timeout_ms` | integer | `1000` | can | How long to wait for flow control or the next consecutive frame (N_Bs, N_Cr). |
 
-The `sim` transport runs the built-in simulator in-process. A `tcp_server` serves one client at a time and goes back to listening when it disconnects. An `mqtt` profile usually goes with `framing.type = "none"`, since every MQTT message is already one frame (a CRC is still possible).
+The `sim` transport runs the built-in simulator in-process. A `tcp_server` serves one client at a time and goes back to listening when it disconnects. An `mqtt` or `can` profile usually goes with `framing.type = "none"`, since every MQTT message or ISO-TP message is already one frame (a CRC is still possible).
 
 ### `[framing]`
 

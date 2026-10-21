@@ -241,7 +241,7 @@ Sequence files are strict: unknown keys are errors (with line numbers), so typos
 |---|---|---|---|
 | `name` | string | file stem | Sequence name (JUnit suite name). |
 | `description` | string | `""` | Free text. |
-| `[vars]` | table | `{}` | Initial variables. |
+| `[vars]` | table | `{}` | Initial variables. `protobench run --var name=value` and the GUI runner's Variables table override them. |
 | `non_interactive` | `"fail"` or `"continue"` | `"fail"` | What `prompt_operator` does in headless runs. `--non-interactive` overrides it. |
 | `continue_on_failure` | bool | `false` | Keep running after a failed step. By default the remaining steps are reported as skipped. |
 | `[[steps]]` | array | `[]` | Steps, each with an `action` key. |
@@ -276,7 +276,33 @@ The step fails on a timeout, on a reply of the wrong type, or on a failed assert
 
 **`log`** — `text`, written to the run log and the report.
 
-**`prompt_operator`** — `message`. The GUI shows a dialog (OK / Fail). Headless runs follow `non_interactive`.
+**`prompt_operator`** — `message`, and optionally `inputs`: values the operator enters. The GUI shows a dialog with **OK** and **Fail**, and one field per input under the message.
+
+```toml
+[[steps]]
+action = "prompt_operator"
+message = "Enter the span gas concentration and the probe readings"
+inputs = [
+  { var = "gas_ppm", label = "Gas concentration", unit = "ppm", min = 0.001 },
+  { var = "zero_mv", label = "Zero reading", unit = "mV" },
+]
+```
+
+| Input key | Default | Meaning |
+|---|---|---|
+| `var` | required | Variable the value is stored in. |
+| `label` | `var` | Field label. |
+| `unit` | `""` | Shown after the field. |
+| `type` | `"float"` | `"float"`, `"int"`, `"string"` or `"bool"`. The variable gets this JSON type, so `"${var}"` in a payload sends a number. |
+| `default` | — | Pre-filled value, used when the variable has no value yet. |
+| `min`, `max` | — | Inclusive bounds (float and int). |
+| `choices` | — | Allowed values of a string input, shown as a dropdown. |
+
+OK stays disabled until every field is valid; an invalid field says why. The entered values are stored in their variables, recorded in the step's `measured`, and logged as `input gas_ppm = 10.0`. A value entered in the GUI is pre-filled the next time the dialog opens in the same session; otherwise the field shows the variable's current value, else `default`.
+
+Headless, each input takes the variable's value (from `--var`, `[vars]` or an earlier step), else `default`. If every input has a value, the values are checked against `type`, `min`, `max` and `choices` and the step passes, or fails on a bad value; nobody is asked. If any input has no value, the step fails and names the missing variables. A step without inputs follows `non_interactive`.
+
+`protobench check` treats each input's `var` as defined, and reports a `var` used twice in one step, `min` above `max`, a `default` of the wrong type or out of range, `choices` on a non-string input, and `min`/`max` on a string or bool input.
 
 **`script`** — run a Rhai script (API in the user guide, *Scripts*).
 

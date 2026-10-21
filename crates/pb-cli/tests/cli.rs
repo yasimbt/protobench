@@ -56,6 +56,35 @@ fn run_smoke_exits_0_and_writes_reports() {
     let _ = std::fs::remove_dir_all(reports);
 }
 
+#[test]
+fn run_var_sets_operator_inputs() {
+    let reports = tmp("vars");
+    let run = |var: &str| {
+        bin()
+            .args(["run", "--project"])
+            .arg(demo())
+            .args(["--sequence", "smoke", "--profile", "sim", "--var", var])
+            .arg("--report-dir")
+            .arg(&reports)
+            .output()
+            .unwrap()
+    };
+    let out = run("load_ohms=4700");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert!(err.contains("log: input load_ohms = 4700.0"), "{err}");
+    assert!(err.contains("log: Done with a 4700.0 Ω load"), "{err}");
+    // Below the input's min: the step fails, exit 1.
+    let out = run("load_ohms=0");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{err}");
+    assert!(err.contains("input `load_ohms`: 0 is below min 1"), "{err}");
+    let out = run("load_ohms");
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--var expects NAME=VALUE"));
+    let _ = std::fs::remove_dir_all(reports);
+}
+
 /// Copies the demo project (one folder level deep) into `dir`.
 fn copy_demo(dir: &Path) {
     for e in std::fs::read_dir(demo()).unwrap().flatten() {

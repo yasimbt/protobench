@@ -4,6 +4,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+use super::input::OperatorInput;
 use crate::diag::{line_col, Diagnostic};
 use crate::error::CoreError;
 
@@ -141,10 +142,14 @@ pub enum Step {
         /// Text (`${var}` is substituted).
         text: String,
     },
-    /// Ask the operator to do something and confirm.
+    /// Ask the operator to do something and confirm, optionally entering
+    /// values.
     PromptOperator {
         /// Instruction.
         message: String,
+        /// Values to enter, stored in variables.
+        #[serde(default)]
+        inputs: Vec<OperatorInput>,
     },
     /// Run a Rhai script (see `docs/USER_GUIDE.md`, "Scripts").
     Script {
@@ -217,7 +222,7 @@ impl Step {
             },
             Step::Loop { count, steps } => format!("loop {count}× ({} steps)", steps.len()),
             Step::Log { text } => format!("log {text}"),
-            Step::PromptOperator { message } => format!("prompt: {message}"),
+            Step::PromptOperator { message, .. } => format!("prompt: {message}"),
             Step::Script { file: Some(f), .. } => format!("script {f}"),
             Step::Script { code, .. } => {
                 let first = code
@@ -351,10 +356,38 @@ mod tests {
     }
 
     #[test]
+    fn prompt_inputs_parse() {
+        let src = r#"
+[[steps]]
+action = "prompt_operator"
+message = "Enter readings"
+inputs = [
+  { var = "gas_ppm", label = "Gas concentration", unit = "ppm", type = "float", min = 0.001 },
+  { var = "n", type = "int", default = 3, max = 9 },
+  { var = "who", type = "string", choices = ["a", "b"] },
+]
+"#;
+        let s = SequenceFile::parse(src, Path::new("s.toml")).unwrap();
+        let Step::PromptOperator { inputs, .. } = &s.steps[0] else {
+            panic!("{:?}", s.steps[0]);
+        };
+        assert_eq!(inputs.len(), 3);
+        assert_eq!(inputs[0].label(), "Gas concentration");
+        assert_eq!(inputs[0].min, Some(0.001));
+        assert_eq!(inputs[1].ty, crate::sequence::InputType::Int);
+        assert_eq!(inputs[1].label(), "n");
+        assert_eq!(inputs[2].choices.as_deref().map(|c| c.len()), Some(2));
+    }
+
+    #[test]
     fn errors_have_lines() {
         let src = "name = \"x\"\n[[steps]]\naction = \"send\"\ncomand = \"Ping\"\n";
         let e = SequenceFile::parse(src, Path::new("s.toml")).unwrap_err();
         assert!(e.message.contains("comand"), "{e}");
+        assert!(e.line.is_some(), "{e}");
+        let src = "[[steps]]\naction = \"prompt_operator\"\nmessage = \"m\"\ninputs = [\n  { var = \"a\" },\n  { var = \"b\", unti = \"mV\" },\n]\n";
+        let e = SequenceFile::parse(src, Path::new("s.toml")).unwrap_err();
+        assert!(e.message.contains("unti"), "{e}");
         assert!(e.line.is_some(), "{e}");
         let src = "[[steps]]\naction = \"teleport\"\n";
         assert!(SequenceFile::parse(src, Path::new("s.toml")).is_err());

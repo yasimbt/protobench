@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crossbeam_channel::{Receiver, Sender};
+use crossbeam_channel::Receiver;
 use egui::{Color32, RichText};
 use prost_reflect::{
     DynamicMessage, FieldDescriptor, Kind, MessageDescriptor, ReflectMessage, Value,
@@ -17,12 +17,12 @@ use pb_core::config::{
     ConnectionProfile, CrcKind, Endian, FramingConfig, FramingType, TransportKind,
 };
 use pb_core::sequence::{
-    run_sequence, PromptAnswer, RunEvent, RunOptions, RunReport, SequenceFile, StepReport,
-    StepStatus,
+    run_sequence, OperatorPrompt, PromptAnswer, RunEvent, RunOptions, RunReport, SequenceFile,
+    StepReport, StepStatus,
 };
 
 use crate::panels::{BAD, OK, WARN};
-use crate::state::{AppState, Dialog, Settings};
+use crate::state::{AppState, OperatorReply, Settings};
 
 // ---------------------------------------------------------------- composer
 
@@ -664,7 +664,7 @@ fn enum_node(
 
 enum GuiRun {
     Event(RunEvent),
-    Prompt(String, Sender<bool>),
+    Prompt(OperatorPrompt, OperatorReply),
 }
 
 struct RunHandle {
@@ -683,6 +683,10 @@ pub struct RunnerState {
     /// Final report of the last run.
     pub report: Option<RunReport>,
     error: Option<String>,
+    /// Variables for the next run as (name, value text), from `[vars]`.
+    vars: Vec<(String, String)>,
+    /// Sequence `vars` was loaded for.
+    vars_for: Option<String>,
 }
 
 impl RunnerState {
@@ -691,7 +695,32 @@ impl RunnerState {
         self.running.is_some()
     }
 
-    /// Starts a sequence by name.
+    /// Selects a sequence.
+    pub fn select(&mut self, name: &str) {
+        self.selected = Some(name.to_string());
+    }
+
+    /// Loads the variables table from the sequence's `[vars]` when the
+    /// selection changes.
+    fn sync_vars(&mut self, state: &AppState) {
+        if self.vars_for == self.selected {
+            return;
+        }
+        self.vars_for = self.selected.clone();
+        self.vars = match (&self.selected, &state.project) {
+            (Some(n), Some(p)) => SequenceFile::load(&p.sequence_path(n))
+                .map(|s| {
+                    s.vars
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+    }
+
+    /// Starts a sequence by name, with the variables table as overrides.
     pub fn start(&mut self, state: &AppState, name: &str) -> Result<(), String> {
         let p = state.project.as_ref().ok_or("no project")?;
         let session = state.session.clone().ok_or("connect first")?;
@@ -699,9 +728,24 @@ impl RunnerState {
         let config = p.config.clone();
         let (tx, rx) = crossbeam_channel::unbounded();
         let abort = Arc::new(AtomicBool::new(false));
+        let vars = if self.vars_for.as_deref() == Some(name) {
+            self.vars
+                .iter()
+                .filter(|(k, _)| !k.trim().is_empty())
+                .map(|(k, v)| {
+                    (
+                        k.trim().to_string(),
+                        pb_core::commands::parse_value(v.trim()),
+                    )
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         let opts = RunOptions {
             non_interactive: None,
             abort: abort.clone(),
+            vars,
         };
         let ptx = tx.clone();
         std::thread::Builder::new()
@@ -710,13 +754,13 @@ impl RunnerState {
                 let mut on_event = |ev: RunEvent| {
                     let _ = tx.send(GuiRun::Event(ev));
                 };
-                let prompt = Box::new(move |msg: &str| {
+                let prompt = Box::new(move |p: &OperatorPrompt| {
                     let (rtx, rrx) = crossbeam_channel::bounded(1);
-                    if ptx.send(GuiRun::Prompt(msg.to_string(), rtx)).is_err() {
+                    if ptx.send(GuiRun::Prompt(p.clone(), rtx)).is_err() {
                         return PromptAnswer::Fail;
                     }
                     match rrx.recv() {
-                        Ok(true) => PromptAnswer::Continue,
+                        Ok(Some(values)) => PromptAnswer::Continue(values),
                         _ => PromptAnswer::Fail,
                     }
                 });
@@ -763,10 +807,7 @@ pub fn runner_poll(rs: &mut RunnerState, state: &mut AppState) {
                 rs.report = Some(*r);
                 finished = true;
             }
-            GuiRun::Prompt(msg, reply) => {
-                state.operator_reply = Some(reply);
-                state.dialog = Some(Dialog::Operator { message: msg });
-            }
+            GuiRun::Prompt(prompt, reply) => state.open_operator(prompt, reply),
         }
     }
     if finished {
@@ -834,6 +875,42 @@ pub fn runner(ui: &mut egui::Ui, rs: &mut RunnerState, state: &mut AppState) {
             }
         }
     });
+    rs.sync_vars(state);
+    if rs.selected.is_some() {
+        egui::CollapsingHeader::new(format!("Variables ({})", rs.vars.len()))
+            .id_salt("seq_vars")
+            .show(ui, |ui| {
+                ui.add_enabled_ui(!rs.is_running(), |ui| {
+                    let mut remove = None;
+                    egui::Grid::new("seq_vars_grid").show(ui, |ui| {
+                        for (i, (k, v)) in rs.vars.iter_mut().enumerate() {
+                            ui.add(egui::TextEdit::singleline(k).desired_width(120.0));
+                            ui.add(egui::TextEdit::singleline(v).desired_width(160.0));
+                            if ui.small_button("✖").on_hover_text("Remove").clicked() {
+                                remove = Some(i);
+                            }
+                            ui.end_row();
+                        }
+                    });
+                    if let Some(i) = remove {
+                        rs.vars.remove(i);
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.button("+ Variable").clicked() {
+                            rs.vars.push((String::new(), String::new()));
+                        }
+                        if ui
+                            .button("Reset")
+                            .on_hover_text("Reload from [vars]")
+                            .clicked()
+                        {
+                            rs.vars_for = None;
+                        }
+                    });
+                    ui.weak("Values in TOML syntax; they override [vars] for the next run.");
+                });
+            });
+    }
     if state.session.is_none() {
         ui.weak("Connect to run sequences.");
     }

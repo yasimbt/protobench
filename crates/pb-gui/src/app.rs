@@ -748,12 +748,26 @@ impl ProtoBenchApp {
                     });
                 });
             }
-            Dialog::Operator { message } => {
+            Dialog::Operator { message, .. } => {
                 egui::Modal::new(egui::Id::new("operator")).show(ctx, |ui| {
                     ui.heading("Operator action");
                     ui.label(&message);
+                    let mut all_valid = true;
+                    if let Some(Dialog::Operator { fields, .. }) = &mut self.state.dialog {
+                        if !fields.is_empty() {
+                            ui.add_space(4.0);
+                            egui::Grid::new("operator_grid").show(ui, |ui| {
+                                for f in fields.iter_mut() {
+                                    operator_field(ui, f);
+                                    if f.value().is_err() {
+                                        all_valid = false;
+                                    }
+                                }
+                            });
+                        }
+                    }
                     ui.horizontal(|ui| {
-                        if ui.button("OK").clicked() {
+                        if ui.add_enabled(all_valid, egui::Button::new("OK")).clicked() {
                             self.state.answer_operator(true);
                         }
                         if ui.button("Fail").clicked() {
@@ -987,6 +1001,38 @@ pub fn parse_shortcut(s: &str) -> Option<egui::KeyboardShortcut> {
         }
     }
     key.map(|k| egui::KeyboardShortcut::new(mods, k))
+}
+
+/// One row of the operator dialog: label, field, unit and why it is invalid.
+fn operator_field(ui: &mut egui::Ui, f: &mut crate::state::OperatorField) {
+    use pb_core::sequence::InputType;
+    ui.label(f.input.label());
+    match (f.input.ty, &f.input.choices) {
+        (InputType::Bool, _) => {
+            let mut b = f.text.trim() == "true";
+            if ui.checkbox(&mut b, "").changed() || f.text.trim().is_empty() {
+                f.text = b.to_string();
+            }
+        }
+        (InputType::String, Some(choices)) => {
+            egui::ComboBox::from_id_salt(("operator_choice", &f.input.var))
+                .selected_text(f.text.as_str())
+                .show_ui(ui, |ui| {
+                    for c in choices {
+                        ui.selectable_value(&mut f.text, c.clone(), c);
+                    }
+                });
+        }
+        _ => {
+            ui.add(egui::TextEdit::singleline(&mut f.text).desired_width(140.0));
+        }
+    }
+    ui.label(&f.input.unit);
+    match f.value() {
+        Ok(_) => ui.label(""),
+        Err(e) => ui.label(RichText::new(e).color(Color32::from_rgb(0xe7, 0x4c, 0x3c))),
+    };
+    ui.end_row();
 }
 
 #[cfg(test)]

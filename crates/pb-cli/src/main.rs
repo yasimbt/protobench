@@ -122,6 +122,10 @@ enum Command {
         /// `non_interactive` setting, else `fail`).
         #[arg(long, value_enum)]
         non_interactive: Option<NonInteractive>,
+        /// Set a variable, overriding `[vars]`: `--var gas_ppm=10`
+        /// (repeatable; values in TOML syntax).
+        #[arg(long = "var", value_name = "NAME=VALUE")]
+        vars: Vec<String>,
     },
     /// Decode a recorded session file.
     Decode {
@@ -223,6 +227,7 @@ fn main() -> ExitCode {
             port,
             report_dir,
             non_interactive,
+            vars,
         } => cmd::run(
             &project,
             &sequence,
@@ -230,6 +235,7 @@ fn main() -> ExitCode {
             port,
             report_dir,
             non_interactive,
+            &vars,
         ),
         Command::Decode {
             file,

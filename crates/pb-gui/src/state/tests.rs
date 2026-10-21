@@ -249,3 +249,66 @@ fn foxglove_toggle_follows_the_connection() {
     s.set_foxglove(false).unwrap();
     assert!(s.foxglove_status().is_none());
 }
+
+fn input(var: &str, min: f64) -> OperatorInput {
+    OperatorInput {
+        var: var.into(),
+        label: None,
+        unit: "mV".into(),
+        ty: Default::default(),
+        default: None,
+        min: Some(min),
+        max: None,
+        choices: None,
+    }
+}
+
+#[test]
+fn operator_dialog_validates_and_remembers_values() {
+    let mut s = AppState::default();
+    let prompt = OperatorPrompt {
+        message: "m".into(),
+        inputs: vec![
+            (input("a", 0.0), Some(Json::from(1.5))),
+            (input("b", 1.0), None),
+        ],
+    };
+    let (tx, rx) = crossbeam_channel::unbounded();
+    s.open_operator(prompt.clone(), tx.clone());
+    let Some(Dialog::Operator { fields, .. }) = &mut s.dialog else {
+        panic!("{:?}", s.dialog);
+    };
+    assert_eq!(fields[0].text, "1.5");
+    assert_eq!(fields[1].value().unwrap_err(), "required");
+    // OK with an invalid field keeps the dialog open.
+    s.answer_operator(true);
+    assert!(s.dialog.is_some() && rx.try_recv().is_err());
+    let Some(Dialog::Operator { fields, .. }) = &mut s.dialog else {
+        unreachable!()
+    };
+    fields[1].text = "0.5".into();
+    assert!(fields[1].value().unwrap_err().contains("below min 1"));
+    fields[1].text = "2".into();
+    s.answer_operator(true);
+    assert!(s.dialog.is_none());
+    assert_eq!(
+        rx.try_recv().unwrap(),
+        Some(vec![
+            ("a".into(), Json::from(1.5)),
+            ("b".into(), Json::from(2.0))
+        ])
+    );
+    // Next time the entered text wins over the runner's value.
+    let mut again = prompt;
+    again.inputs[0].1 = Some(Json::from(9.0));
+    s.open_operator(again, tx);
+    let Some(Dialog::Operator { fields, .. }) = &s.dialog else {
+        unreachable!()
+    };
+    assert_eq!(
+        (fields[0].text.as_str(), fields[1].text.as_str()),
+        ("1.5", "2")
+    );
+    s.cancel_dialog();
+    assert_eq!(rx.try_recv().unwrap(), None);
+}

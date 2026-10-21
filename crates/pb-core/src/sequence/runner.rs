@@ -11,6 +11,7 @@ use serde_json::Value as Json;
 use super::assert::{
     check, check_each, check_stat, measure_all, measure_field, AssertionResult, Measured,
 };
+use super::input::OperatorInput;
 use super::model::{Assertion, NonInteractive, SequenceFile, Step};
 use super::report::{RunReport, StepReport, StepStatus, Summary};
 use crate::codec::DecodedMessage;
@@ -39,17 +40,27 @@ pub enum RunEvent {
     Finished(Box<RunReport>),
 }
 
+/// What a `prompt_operator` step asks.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OperatorPrompt {
+    /// Instruction, with `${var}` substituted.
+    pub message: String,
+    /// Values to enter, each with its pre-fill (the variable's current
+    /// value, else the input's `default`).
+    pub inputs: Vec<(OperatorInput, Option<Json>)>,
+}
+
 /// Operator's answer to `prompt_operator`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum PromptAnswer {
-    /// Done, continue.
-    Continue,
+    /// Done, continue, with the entered values as (var, value).
+    Continue(Vec<(String, Json)>),
     /// Fail the step.
     Fail,
 }
 
 /// Interactive prompt handler (GUI); `None` means headless.
-pub type PromptFn<'a> = Box<dyn FnMut(&str) -> PromptAnswer + 'a>;
+pub type PromptFn<'a> = Box<dyn FnMut(&OperatorPrompt) -> PromptAnswer + 'a>;
 
 /// Options for a run.
 #[derive(Clone, Default)]
@@ -58,6 +69,8 @@ pub struct RunOptions {
     pub non_interactive: Option<NonInteractive>,
     /// Set to abort the run.
     pub abort: Arc<AtomicBool>,
+    /// Variables that override the sequence's `[vars]` (`--var`).
+    pub vars: Vec<(String, Json)>,
 }
 
 /// Most messages kept for `expect` steps.
@@ -219,11 +232,12 @@ pub fn run_sequence<'a>(
 ) -> RunReport {
     let started = chrono::Local::now().to_rfc3339();
     let t0 = Instant::now();
-    let vars = seq
+    let mut vars: BTreeMap<String, Json> = seq
         .vars
         .iter()
         .map(|(k, v)| (k.clone(), toml_to_json(v)))
         .collect();
+    vars.extend(opts.vars);
     let mut ctx = Ctx {
         session,
         config,
@@ -421,14 +435,51 @@ impl Ctx<'_> {
             Step::Script {
                 code, timeout_ms, ..
             } => self.script(code.as_deref().unwrap_or(""), *timeout_ms),
-            Step::PromptOperator { message } => {
-                let msg = interpolate(message, &self.vars).unwrap_or_else(|_| message.clone());
-                match self.prompt.as_mut() {
-                    Some(p) => match p(&msg) {
-                        PromptAnswer::Continue => Outcome::pass(),
-                        PromptAnswer::Fail => Outcome::fail("operator answered fail"),
-                    },
-                    None => match self.headless {
+            Step::PromptOperator { message, inputs } => self.prompt_operator(message, inputs),
+        }
+    }
+
+    fn prompt_operator(&mut self, message: &str, inputs: &[OperatorInput]) -> Outcome {
+        let msg = interpolate(message, &self.vars).unwrap_or_else(|_| message.to_string());
+        let prompt = OperatorPrompt {
+            message: msg.clone(),
+            inputs: inputs
+                .iter()
+                .map(|i| {
+                    let v = self.vars.get(&i.var).cloned().or_else(|| i.default_json());
+                    (i.clone(), v)
+                })
+                .collect(),
+        };
+        let answers = match self.prompt.as_mut() {
+            Some(p) => match p(&prompt) {
+                PromptAnswer::Continue(values) => values,
+                PromptAnswer::Fail => return Outcome::fail("operator answered fail"),
+            },
+            None => {
+                let missing: Vec<&str> = prompt
+                    .inputs
+                    .iter()
+                    .filter(|(_, v)| v.is_none())
+                    .map(|(i, _)| i.var.as_str())
+                    .collect();
+                if !inputs.is_empty() && missing.is_empty() {
+                    prompt
+                        .inputs
+                        .iter()
+                        .filter_map(|(i, v)| Some((i.var.clone(), v.clone()?)))
+                        .collect()
+                } else if !missing.is_empty() {
+                    return Outcome::fail(format!(
+                        "no value for {} in non-interactive mode (use --var): {msg}",
+                        missing
+                            .iter()
+                            .map(|m| format!("`{m}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ));
+                } else {
+                    return match self.headless {
                         NonInteractive::Continue => {
                             self.log_line(format!("operator prompt (auto-continued): {msg}"));
                             let mut o = Outcome::pass();
@@ -438,10 +489,28 @@ impl Ctx<'_> {
                         NonInteractive::Fail => {
                             Outcome::fail(format!("operator prompt in non-interactive mode: {msg}"))
                         }
-                    },
+                    };
                 }
             }
+        };
+        // All values are checked before any is stored.
+        let mut checked = Vec::new();
+        for input in inputs {
+            let Some((_, v)) = answers.iter().find(|(k, _)| *k == input.var) else {
+                return Outcome::fail(format!("no value for `{}`", input.var));
+            };
+            match input.validate(v) {
+                Ok(v) => checked.push((input.var.clone(), v)),
+                Err(e) => return Outcome::fail(format!("input `{}`: {e}", input.var)),
+            }
         }
+        let mut o = Outcome::pass();
+        for (var, v) in checked {
+            self.log_line(format!("input {var} = {v}"));
+            self.vars.insert(var.clone(), v.clone());
+            o.measured.insert(var, v);
+        }
+        o
     }
 
     #[allow(clippy::too_many_arguments)]

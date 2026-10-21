@@ -266,6 +266,17 @@ impl SeqCheck<'_> {
             Step::Loop { steps, .. } => {
                 self.steps(steps, &format!("{index}."));
             }
+            Step::PromptOperator { inputs, .. } => {
+                let mut seen = BTreeSet::new();
+                for i in inputs {
+                    if !seen.insert(i.var.as_str()) {
+                        self.err(index, action, format!("input `{}` appears twice", i.var));
+                    }
+                    for e in i.spec_errors() {
+                        self.err(index, action, e);
+                    }
+                }
+            }
             Step::Script { code, .. } => {
                 if let Err((msg, line)) =
                     crate::sequence::script::compile_check(code.as_deref().unwrap_or(""))
@@ -376,7 +387,7 @@ impl SeqCheck<'_> {
                 self.out.push(Diagnostic::warning(
                     self.path,
                     Some(line_col(src, at).0),
-                    format!("variable `{name}` is never defined ([vars], set or save)"),
+                    format!("variable `{name}` is never defined ([vars], set, save or inputs)"),
                 ));
             }
             offset += start + 2 + end;
@@ -393,6 +404,7 @@ fn collect_defined(steps: &[Step], out: &mut BTreeSet<String>) {
                 out.extend(vars.keys().cloned());
             }
             Step::Send { save, .. } => out.extend(save.keys().cloned()),
+            Step::PromptOperator { inputs, .. } => out.extend(inputs.iter().map(|i| i.var.clone())),
             Step::Loop { steps, .. } => collect_defined(steps, out),
             Step::Script { code: Some(c), .. } => out.extend(script_set_vars(c)),
             _ => {}
@@ -585,7 +597,7 @@ mod tests {
         assert_eq!(
             text,
             vec![
-                "s.toml:10: warning: variable `nope` is never defined ([vars], set or save)"
+                "s.toml:10: warning: variable `nope` is never defined ([vars], set, save or inputs)"
                     .to_string()
             ]
         );
@@ -684,6 +696,57 @@ code = "let x = ;"
             text[0].starts_with("s.toml:12: error: step 3 (script): script line 1:"),
             "{text:#?}"
         );
+    }
+
+    #[test]
+    fn operator_inputs_define_vars_and_specs_are_checked() {
+        let p = demo();
+        let src = r#"
+[[steps]]
+action = "prompt_operator"
+message = "Enter readings"
+inputs = [
+  { var = "gas_ppm", unit = "ppm", min = 0.001 },
+  { var = "serial", type = "string", choices = ["A", "B"], default = "A" },
+]
+
+[[steps]]
+action = "log"
+text = "${gas_ppm} ${serial}"
+"#;
+        let d = check_sequence_str(src, Path::new("s.toml"), &p.config, None);
+        assert!(d.is_empty(), "{d:#?}");
+
+        let src = r#"
+[[steps]]
+action = "prompt_operator"
+message = "x"
+inputs = [
+  { var = "a", min = 5, max = 1 },
+  { var = "a", default = 20, max = 10 },
+  { var = "b", type = "int", default = "ten" },
+  { var = "c", type = "float", choices = ["x"] },
+]
+"#;
+        let d = check_sequence_str(src, Path::new("s.toml"), &p.config, None);
+        let text: Vec<String> = d.iter().map(|d| d.to_string()).collect();
+        let has = |needle: &str| {
+            text.iter().any(|t| {
+                t.starts_with("s.toml:2: error: step 1 (prompt_operator): ") && t.contains(needle)
+            })
+        };
+        assert!(has("input `a`: min 5 is above max 1"), "{text:#?}");
+        assert!(has("input `a` appears twice"), "{text:#?}");
+        assert!(has("input `a`: default: 20 is above max 10"), "{text:#?}");
+        assert!(
+            has("input `b`: default: \"ten\" is not an integer"),
+            "{text:#?}"
+        );
+        assert!(
+            has("input `c`: choices only apply to string inputs"),
+            "{text:#?}"
+        );
+        assert_eq!(d.len(), 5, "{text:#?}");
     }
 
     #[test]

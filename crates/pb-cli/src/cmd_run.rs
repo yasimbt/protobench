@@ -20,7 +20,9 @@ pub fn run(
     port: Option<String>,
     report_dir: Option<PathBuf>,
     ni: Option<NonInteractive>,
+    vars: &[String],
 ) -> Result<ExitCode> {
+    let vars = crate::cmd::parse_sets("--var", vars)?;
     let p = Project::open(dir);
     for d in &p.diagnostics {
         eprintln!("{d}");
@@ -37,6 +39,7 @@ pub fn run(
             NonInteractive::Fail => pb_core::sequence::NonInteractive::Fail,
             NonInteractive::Continue => pb_core::sequence::NonInteractive::Continue,
         }),
+        vars,
         ..Default::default()
     };
     let mut on_event = |ev: RunEvent| match ev {

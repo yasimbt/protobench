@@ -3,7 +3,8 @@
 //! 1. Headless: renders frames with `egui::Context::run_ui` (no display
 //!    needed) while a script clicks Connect, Start Stream, Set Bias (prompt),
 //!    Erase Calibration (confirm) and sends every composer message, through
-//!    the same `AppState` actions the buttons call. It then checks that the
+//!    the same `AppState` actions the buttons call, then runs the `smoke`
+//!    sequence and answers its operator dialog. It then checks that the
 //!    plot, readout, indicator and text-console data are there.
 //! 2. With `--window`: the same script in a real eframe window.
 
@@ -47,6 +48,9 @@ enum Step {
     Foxglove,
     Parquet,
     WaitParquet,
+    Sequence,
+    WaitOperator,
+    WaitSequence,
     Render,
     Done,
 }
@@ -56,6 +60,7 @@ struct Script {
     step: Step,
     started: Instant,
     frames_in_render: u32,
+    frames_in_dialog: u32,
     composer_targets: Vec<String>,
     log: Vec<String>,
     result: Option<Result<String, String>>,
@@ -67,6 +72,7 @@ impl Script {
             step: Step::WaitConnected,
             started: Instant::now(),
             frames_in_render: 0,
+            frames_in_dialog: 0,
             composer_targets: Vec::new(),
             log: Vec::new(),
             result: None,
@@ -236,8 +242,48 @@ impl Script {
                     }
                     self.log.push(format!("Parquet export: {n}"));
                     s.set_foxglove(false).ok();
-                    self.step = Step::Render;
+                    self.step = Step::Sequence;
                 }
+            }
+            Step::Sequence => {
+                app.windows.runner = true;
+                app.runner.select("smoke");
+                match app.runner.start(&app.state, "smoke") {
+                    Ok(()) => self.step = Step::WaitOperator,
+                    Err(e) => self.fail(format!("sequence runner: {e}")),
+                }
+            }
+            Step::WaitOperator => {
+                let Some(Dialog::Operator { fields, .. }) = &mut s.dialog else {
+                    if !app.runner.is_running() {
+                        self.fail("smoke sequence finished without an operator dialog");
+                    }
+                    return;
+                };
+                if fields.len() != 1 || fields[0].text != "10000" {
+                    return self.fail(format!("operator dialog fields: {fields:?}"));
+                }
+                // Let the dialog render a few frames before answering.
+                self.frames_in_dialog += 1;
+                if self.frames_in_dialog >= 5 {
+                    fields[0].text = "4700".into();
+                    s.answer_operator(true);
+                    self.step = Step::WaitSequence;
+                }
+            }
+            Step::WaitSequence => {
+                let Some(r) = &app.runner.report else { return };
+                if !r.passed {
+                    return self.fail(format!("smoke sequence failed: {}", r.summary_text()));
+                }
+                if !r.log.iter().any(|l| l == "input load_ohms = 4700.0") {
+                    return self.fail(format!("operator input not logged: {:?}", r.log));
+                }
+                self.log.push(format!(
+                    "smoke sequence passed with the operator entering load_ohms = 4700 ({} steps)",
+                    r.summary.total
+                ));
+                self.step = Step::Render;
             }
             Step::Render => {
                 if self.frames_in_render == 0 {

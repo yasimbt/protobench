@@ -249,6 +249,149 @@ message = "never shown"
     assert!(!r.passed);
 }
 
+fn run_with(
+    s: &Session,
+    p: &Project,
+    src: &str,
+    opts: pb_core::sequence::RunOptions,
+    prompt: Option<pb_core::sequence::PromptFn<'_>>,
+) -> pb_core::sequence::RunReport {
+    let seq = pb_core::sequence::SequenceFile::parse(src, std::path::Path::new("in.toml")).unwrap();
+    let mut ev = |_e: pb_core::sequence::RunEvent| {};
+    pb_core::sequence::run_sequence(s, &p.config, &seq, opts, &mut ev, prompt)
+}
+
+const INPUTS_SEQ: &str = r#"
+non_interactive = "continue"
+[vars]
+gas_ppm = 1.0
+[[steps]]
+action = "prompt_operator"
+message = "Enter the readings"
+inputs = [
+  { var = "gas_ppm", unit = "ppm", min = 0.001 },
+  { var = "zero_mv", unit = "mV" },
+  { var = "bias", type = "int", min = 0, max = 500, default = 250 },
+]
+[[steps]]
+action = "send"
+message = "set_bias"
+payload = { millivolts = "${bias}" }
+expect = "ack"
+assert = [ { path = "ack.ok", eq = true } ]
+[[steps]]
+action = "log"
+text = "ppm=${gas_ppm} zero=${zero_mv}"
+"#;
+
+#[test]
+fn headless_inputs_use_vars_and_defaults() {
+    use pb_core::sequence::{RunOptions, StepStatus};
+    use serde_json::json;
+    let p = demo();
+    let s = start(&p, "sim", None);
+    let opts = |vars: Vec<(&str, serde_json::Value)>| RunOptions {
+        vars: vars.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+        ..Default::default()
+    };
+
+    // Every input has a value: --var overrides [vars], int --var for a
+    // float input becomes a float, the int default reaches the payload as
+    // a number.
+    let r = run_with(
+        &s,
+        &p,
+        INPUTS_SEQ,
+        opts(vec![("gas_ppm", json!(10)), ("zero_mv", json!(980))]),
+        None,
+    );
+    assert!(r.passed, "{}", r.summary_text());
+    let m = &r.steps[0].measured;
+    assert_eq!(m["gas_ppm"], json!(10.0));
+    assert_eq!(m["zero_mv"], json!(980.0));
+    assert_eq!(m["bias"], json!(250));
+    assert_eq!(r.vars["bias"], json!(250));
+    assert_eq!(
+        r.log,
+        vec![
+            "input gas_ppm = 10.0".to_string(),
+            "input zero_mv = 980.0".into(),
+            "input bias = 250".into(),
+            "ppm=10.0 zero=980.0".into(),
+        ]
+    );
+
+    // A missing value fails under `continue` and names the variable.
+    let r = run_with(&s, &p, INPUTS_SEQ, opts(vec![]), None);
+    assert!(!r.passed);
+    assert_eq!(r.steps[0].status, StepStatus::Fail);
+    let msg = r.steps[0].message.clone().unwrap();
+    assert!(
+        msg.contains("`zero_mv`") && !msg.contains("gas_ppm"),
+        "{msg}"
+    );
+    assert!(!r.vars.contains_key("zero_mv"));
+
+    // Out of range fails, and nothing from the step is stored.
+    let r = run_with(
+        &s,
+        &p,
+        INPUTS_SEQ,
+        opts(vec![("zero_mv", json!(1)), ("bias", json!(900))]),
+        None,
+    );
+    assert_eq!(r.steps[0].status, StepStatus::Fail);
+    let msg = r.steps[0].message.clone().unwrap();
+    assert!(msg.contains("input `bias`: 900 is above max 500"), "{msg}");
+    assert_eq!(r.vars["zero_mv"], json!(1));
+    assert_eq!(r.vars["bias"], json!(900));
+}
+
+#[test]
+fn interactive_inputs_get_prefill_and_store_answers() {
+    use pb_core::sequence::{OperatorPrompt, PromptAnswer, RunOptions};
+    use serde_json::json;
+    let p = demo();
+    let s = start(&p, "sim", None);
+    let mut asked: Vec<OperatorPrompt> = Vec::new();
+    let prompt = Box::new(|q: &OperatorPrompt| {
+        asked.push(q.clone());
+        PromptAnswer::Continue(vec![
+            ("gas_ppm".into(), json!(5.5)),
+            ("zero_mv".into(), json!(1000.0)),
+            ("bias".into(), json!(100)),
+        ])
+    });
+    let r = run_with(&s, &p, INPUTS_SEQ, RunOptions::default(), Some(prompt));
+    assert!(r.passed, "{}", r.summary_text());
+    assert_eq!(r.vars["gas_ppm"], json!(5.5));
+    assert_eq!(asked.len(), 1);
+    let pre: Vec<_> = asked[0]
+        .inputs
+        .iter()
+        .map(|(i, v)| (i.var.as_str(), v.clone()))
+        .collect();
+    assert_eq!(
+        pre,
+        vec![
+            ("gas_ppm", Some(json!(1.0))),
+            ("zero_mv", None),
+            ("bias", Some(json!(250)))
+        ]
+    );
+    // An answer out of range still fails the step.
+    let prompt = Box::new(|_: &OperatorPrompt| {
+        PromptAnswer::Continue(vec![
+            ("gas_ppm".into(), json!(0.0)),
+            ("zero_mv".into(), json!(0.0)),
+            ("bias".into(), json!(1)),
+        ])
+    });
+    let r = run_with(&s, &p, INPUTS_SEQ, RunOptions::default(), Some(prompt));
+    assert!(!r.passed);
+    assert!(r.steps[0].message.as_deref().unwrap().contains("below min"));
+}
+
 #[test]
 fn expect_set_save_and_vars() {
     let p = demo();

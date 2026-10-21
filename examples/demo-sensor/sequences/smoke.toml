@@ -39,7 +39,9 @@ ms = 100
 
 [[steps]]
 action = "prompt_operator"
-message = "Connect the 10 kΩ load and press OK"
+message = "Connect the load and enter its resistance"
+# Headless runs take the default or --var load_ohms=4700.
+inputs = [ { var = "load_ohms", label = "Load", unit = "Ω", min = 1, default = 10000 } ]
 
 [[steps]]
 action = "loop"
@@ -48,4 +50,4 @@ steps = [ { action = "send", command = "Ping", expect = "pong" } ]
 
 [[steps]]
 action = "log"
-text = "Done"
+text = "Done with a ${load_ohms} Ω load"

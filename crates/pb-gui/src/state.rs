@@ -17,6 +17,7 @@ use pb_core::config::{CommandConfig, ConnectionProfile};
 use pb_core::diag::Diagnostic;
 use pb_core::project::Project;
 use pb_core::recorder::{export_csv, recording_path, CsvMode, SessionWriter};
+use pb_core::sequence::{OperatorInput, OperatorPrompt};
 use pb_core::session::{
     BadFrame, ConnState, Direction, RequestOutcome, Session, SessionEvent, SessionParams,
 };
@@ -91,12 +92,33 @@ pub enum Dialog {
     Operator {
         /// Instruction.
         message: String,
+        /// Values to enter.
+        fields: Vec<OperatorField>,
     },
     /// The project changed on disk.
     Reload {
         /// What changed.
         what: String,
     },
+}
+
+/// Answer to an operator prompt: the entered values, or None for Fail.
+pub type OperatorReply = Sender<Option<Vec<(String, Json)>>>;
+
+/// One input field of an operator dialog.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OperatorField {
+    /// Spec from the sequence.
+    pub input: OperatorInput,
+    /// Text being edited.
+    pub text: String,
+}
+
+impl OperatorField {
+    /// The parsed value, or why it is invalid.
+    pub fn value(&self) -> Result<Json, String> {
+        self.input.parse_text(&self.text)
+    }
 }
 
 /// What happened when a command button was clicked.
@@ -312,7 +334,9 @@ pub struct AppState {
     jobs_tx: Sender<JobResult>,
     jobs_rx: Receiver<JobResult>,
     /// Answer channel for an operator prompt from a running sequence.
-    pub operator_reply: Option<Sender<bool>>,
+    pub operator_reply: Option<OperatorReply>,
+    /// Text last entered per input variable, pre-filled next time.
+    pub operator_memory: HashMap<String, String>,
     /// Foxglove server wanted (survives reconnects).
     pub foxglove_enabled: bool,
     foxglove: Option<pb_core::foxglove::FoxgloveServer>,
@@ -357,6 +381,7 @@ impl AppState {
             jobs_tx,
             jobs_rx,
             operator_reply: None,
+            operator_memory: HashMap::new(),
             foxglove_enabled: false,
             foxglove: None,
         }
@@ -653,16 +678,57 @@ impl AppState {
     pub fn cancel_dialog(&mut self) {
         if let Some(Dialog::Operator { .. }) = &self.dialog {
             if let Some(tx) = self.operator_reply.take() {
-                let _ = tx.send(false);
+                let _ = tx.send(None);
             }
         }
         self.dialog = None;
     }
 
-    /// Answers a `prompt_operator` dialog from a running sequence.
+    /// Opens the dialog for a `prompt_operator` step. Fields are pre-filled
+    /// with what the operator entered last, else the runner's value.
+    pub fn open_operator(&mut self, prompt: OperatorPrompt, reply: OperatorReply) {
+        let fields = prompt
+            .inputs
+            .into_iter()
+            .map(|(input, v)| {
+                let text = self
+                    .operator_memory
+                    .get(&input.var)
+                    .cloned()
+                    .or_else(|| v.as_ref().map(OperatorInput::to_text))
+                    .unwrap_or_default();
+                OperatorField { input, text }
+            })
+            .collect();
+        self.operator_reply = Some(reply);
+        self.dialog = Some(Dialog::Operator {
+            message: prompt.message,
+            fields,
+        });
+    }
+
+    /// Answers a `prompt_operator` dialog from a running sequence. OK does
+    /// nothing while a field is invalid.
     pub fn answer_operator(&mut self, ok: bool) {
+        let answer = match (&self.dialog, ok) {
+            (Some(Dialog::Operator { fields, .. }), true) => {
+                let Ok(values) = fields
+                    .iter()
+                    .map(|f| f.value().map(|v| (f.input.var.clone(), v)))
+                    .collect::<Result<Vec<_>, _>>()
+                else {
+                    return;
+                };
+                for f in fields {
+                    self.operator_memory
+                        .insert(f.input.var.clone(), f.text.clone());
+                }
+                Some(values)
+            }
+            _ => None,
+        };
         if let Some(tx) = self.operator_reply.take() {
-            let _ = tx.send(ok);
+            let _ = tx.send(answer);
         }
         self.dialog = None;
     }

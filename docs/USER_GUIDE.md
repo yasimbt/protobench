@@ -155,7 +155,7 @@ Builds and sends any message the schema allows.
 
 ### Sequence Runner (Tools menu)
 
-Pick a sequence from `sequences/`, then **▶ Run**. Steps appear with their status (✔ pass, ✖ fail or error, – skipped), duration, message and assertion results (description and measured value); the current step has a spinner. **■ Abort** stops after the current step's wait. `prompt_operator` steps show a dialog with **OK** and **Fail**. The summary line shows the overall result; **Save report…** writes the JSON and JUnit XML reports to a folder.
+Pick a sequence from `sequences/`, then **▶ Run**. Steps appear with their status (✔ pass, ✖ fail or error, – skipped), duration, message and assertion results (description and measured value); the current step has a spinner. **■ Abort** stops after the current step's wait. `prompt_operator` steps show a dialog with **OK** and **Fail**, plus a field for each of the step's `inputs` (OK stays disabled until every field is valid). The **Variables** section under the sequence picker lists the sequence's `[vars]`; edit a value, or add a variable with **+ Variable**, to override it for the next run (values in TOML syntax; **Reset** reloads `[vars]`). The summary line shows the overall result; **Save report…** writes the JSON and JUnit XML reports to a folder.
 
 ### Project Editor (Tools menu)
 
@@ -197,7 +197,7 @@ A sequence file is a list of steps: `send`, `wait`, `expect`, `capture`, `set`, 
 2. sends `set_bias` with `millivolts = ${bias_mv}` and asserts `ack.ok == true`;
 3. starts the stream;
 4. captures two channels for 2 s and checks the mean and standard deviation of the current and the Vout sample rate;
-5. waits, asks the operator to connect a load, pings three times in a loop, and logs "Done".
+5. waits, asks the operator to connect a load and enter its resistance (`load_ohms`, default 10000 Ω), pings three times in a loop, and logs "Done with a … Ω load".
 
 By default a failed step skips the remaining steps (`continue_on_failure = true` keeps going). Each executed step is one JUnit test case.
 
@@ -244,7 +244,8 @@ protobench schema   --project <dir> [--message <type>]
 protobench send     --project <dir> [--profile <name>] [--port <p>] --command <name> [--set field=value ...] [--wait]
 protobench monitor  --project <dir> [--profile <name>] [--port <p>] [--json] [--channels a,b] [--send <cmd>] [--duration <s>] [--record <file>]
                     [--foxglove <port>] [--foxglove-bind <addr>]
-protobench run      --project <dir> --sequence <name> [--profile <name>] [--port <p>] [--report-dir <d>] [--non-interactive fail|continue]
+protobench run      --project <dir> --sequence <name> [--profile <name>] [--port <p>] [--report-dir <d>]
+                    [--non-interactive fail|continue] [--var <name>=<value>]...
 protobench check    --project <dir> [--json]
 protobench decode   <file.pbsession> [--json] [--csv out.csv] [--parquet out.parquet] [--mcap out.mcap]
                     [--channels a,b] [--range <t0>:<t1>] [--per-channel]
@@ -255,7 +256,7 @@ protobench sim      --project <dir> [--tcp <port>] [--bind <addr>]
 - `schema` prints messages, fields with numbers, types and comments, and enums.
 - `send` sends one command. `--set millivolts=300` overrides payload fields (values in TOML syntax). Without `--wait` it is fire-and-forget; with it, the reply is printed as JSON and the exit code is 1 on timeout or error.
 - `monitor` prints decoded messages and text lines (`--json`: one object per line), or with `--channels` the latest channel values whenever they change. `--send` sends commands after connecting; `--duration` stops after N seconds; `--record` writes a session file. `--foxglove 8765` also serves the session to Foxglove (see *Foxglove server*), on `127.0.0.1` unless `--foxglove-bind 0.0.0.0`. With a `tcp_server` profile, `monitor`, `send` and `run` wait for the client to connect.
-- `run` runs a sequence headlessly and writes `<sequence>_<timestamp>.json` and `.xml` to `--report-dir` (default `<project>/reports`). Exit codes: **0** all steps passed, **1** a step failed, **2** configuration or connection error. `--non-interactive` decides what `prompt_operator` does (default: the sequence's `non_interactive`, else `fail`). `--port` overrides the profile's port, so the same sequence runs on any test station: `protobench run --project . --sequence smoke --profile usb --port COM5`.
+- `run` runs a sequence headlessly and writes `<sequence>_<timestamp>.json` and `.xml` to `--report-dir` (default `<project>/reports`). Exit codes: **0** all steps passed, **1** a step failed, **2** configuration or connection error. `--non-interactive` decides what `prompt_operator` does (default: the sequence's `non_interactive`, else `fail`). `--port` overrides the profile's port, so the same sequence runs on any test station: `protobench run --project . --sequence smoke --profile usb --port COM5`. `--var load_ohms=4700` sets a variable, overriding `[vars]` (repeatable; values in TOML syntax like `send --set`, so `--var name='"abc"'` is a string and a value that is not valid TOML is taken as a string). It also answers `prompt_operator` inputs with the same `var`, so a sequence that asks for measured values runs unattended.
 - `check` checks a project without connecting: `project.toml`, the schema, every sequence (commands, messages, assertion and `save` paths, channels, statistics, scripts that do not compile, `${vars}` nothing defines) and the channels in `layout.json`. Findings print as `file:line: error|warning: message`; the exit code is **1** if there is any error, **0** otherwise, so it fits a CI step.
 - `decode` prints a recording (`--json`: one object per record), or exports its channels to CSV or Parquet and its messages to MCAP. `--channels` limits the export to some channels, `--range 12.5:20` to a time window in seconds (either side may be empty), and `--per-channel` writes one CSV per channel.
 - `sim` runs the project's simulator as a TCP server (default port 9000). Point a `tcp_client` profile at it to test the real network path.

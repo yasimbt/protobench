@@ -198,12 +198,13 @@ fn print_enum(schema: &Schema, e: &prost_reflect::EnumDescriptor) {
     println!("}}");
 }
 
-fn parse_sets(sets: &[String]) -> Result<Vec<(String, serde_json::Value)>> {
+/// Parses `--set` / `--var` arguments (`NAME=VALUE`, value in TOML syntax).
+pub fn parse_sets(flag: &str, sets: &[String]) -> Result<Vec<(String, serde_json::Value)>> {
     sets.iter()
         .map(|s| {
             let (k, v) = s
                 .split_once('=')
-                .ok_or_else(|| anyhow!("--set expects FIELD=VALUE, got `{s}`"))?;
+                .ok_or_else(|| anyhow!("{flag} expects NAME=VALUE, got `{s}`"))?;
             Ok((k.trim().to_string(), parse_value(v.trim())))
         })
         .collect()
@@ -223,7 +224,7 @@ pub fn send(
         .command(command)
         .ok_or_else(|| anyhow!("no command `{command}` in project.toml"))?
         .clone();
-    let overrides = parse_sets(set)?;
+    let overrides = parse_sets("--set", set)?;
     let session = connect(&p, profile, port)?;
     let mut req = build_command(
         &p.config,
@@ -425,8 +426,17 @@ pub fn run(
     port: Option<String>,
     report_dir: Option<PathBuf>,
     non_interactive: Option<NonInteractive>,
+    vars: &[String],
 ) -> Result<ExitCode> {
-    crate::cmd_run::run(dir, sequence, profile, port, report_dir, non_interactive)
+    crate::cmd_run::run(
+        dir,
+        sequence,
+        profile,
+        port,
+        report_dir,
+        non_interactive,
+        vars,
+    )
 }
 
 pub fn sim(dir: &Path, bind: &str, port: u16) -> Result<ExitCode> {

@@ -70,6 +70,8 @@ pub struct Assertion {
 pub enum Step {
     /// Send a command (by name) or an inline message.
     Send {
+        /// Device to send to (`main` if omitted).
+        device: Option<String>,
         /// Command name from project.toml.
         command: Option<String>,
         /// Inline message (oneof member or type).
@@ -96,6 +98,8 @@ pub enum Step {
     },
     /// Wait for a received message.
     Expect {
+        /// Device the message comes from (`main` if omitted).
+        device: Option<String>,
         /// Message (oneof member or type).
         message: String,
         /// How long to wait.
@@ -107,6 +111,9 @@ pub enum Step {
     },
     /// Collect channel samples, then check statistics.
     Capture {
+        /// With a device, channel names (here and in the assertions) are
+        /// that device's own (`reading.vout_mv` for `ref.reading.vout_mv`).
+        device: Option<String>,
         /// Channels to capture.
         channels: Vec<String>,
         /// Capture for this long.
@@ -176,7 +183,25 @@ fn default_capture_timeout() -> u64 {
     10_000
 }
 
+/// `ref:` for a device other than `main`, else empty (for labels).
+fn device_tag(device: &Option<String>) -> String {
+    match device.as_deref() {
+        Some(d) if d != crate::config::MAIN_DEVICE => format!("{d}:"),
+        _ => String::new(),
+    }
+}
+
 impl Step {
+    /// The device a step talks to, if it names one.
+    pub fn device(&self) -> Option<&str> {
+        match self {
+            Step::Send { device, .. }
+            | Step::Expect { device, .. }
+            | Step::Capture { device, .. } => device.as_deref(),
+            _ => None,
+        }
+    }
+
     /// Action name.
     pub fn action(&self) -> &'static str {
         match self {
@@ -196,23 +221,36 @@ impl Step {
     pub fn label(&self) -> String {
         match self {
             Step::Send {
-                command, message, ..
+                device,
+                command,
+                message,
+                ..
             } => format!(
-                "send {}",
+                "send {}{}",
+                device_tag(device),
                 command.as_deref().or(message.as_deref()).unwrap_or("?")
             ),
             Step::Wait { ms } => format!("wait {ms} ms"),
-            Step::Expect { message, .. } => format!("expect {message}"),
+            Step::Expect {
+                device, message, ..
+            } => format!("expect {}{message}", device_tag(device)),
             Step::Capture {
+                device,
                 channels,
                 duration_ms,
                 samples,
                 ..
-            } => match (duration_ms, samples) {
-                (Some(d), _) => format!("capture {} ch for {d} ms", channels.len()),
-                (None, Some(n)) => format!("capture {n} samples"),
-                _ => "capture".into(),
-            },
+            } => {
+                let on = match device_tag(device).trim_end_matches(':') {
+                    "" => String::new(),
+                    d => format!(" on {d}"),
+                };
+                match (duration_ms, samples) {
+                    (Some(d), _) => format!("capture {} ch{on} for {d} ms", channels.len()),
+                    (None, Some(n)) => format!("capture {n} samples{on}"),
+                    _ => format!("capture{on}"),
+                }
+            }
             Step::Set { var, vars, .. } => match var {
                 Some(v) => format!("set {v}"),
                 None => format!(

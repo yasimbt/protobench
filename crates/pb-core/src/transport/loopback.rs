@@ -48,6 +48,12 @@ pub fn pair_with_mode(messages: bool) -> (LoopbackEnd, LoopbackEnd) {
 }
 
 impl LoopbackEnd {
+    /// Sets the name `describe` returns.
+    pub fn named(mut self, name: &'static str) -> LoopbackEnd {
+        self.name = name;
+        self
+    }
+
     fn fill(&mut self, buf: &mut [u8]) -> usize {
         let n = buf.len().min(self.pending.len());
         buf[..n].copy_from_slice(&self.pending[..n]);

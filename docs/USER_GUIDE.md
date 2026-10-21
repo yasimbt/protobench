@@ -50,6 +50,27 @@ A `tcp_server` profile shows **Waiting for client** until a client connects, and
 
 Writes give up after 1 s. A TCP peer that stops reading for that long counts as a lost link (and reconnects with `auto_reconnect`); a serial port that cannot take the data in time (flow control held, device stalled) fails only that command.
 
+## Multiple devices
+
+A project can connect several different devices at once: the board under test plus a reference meter, a power supply with a protobuf interface, or a second board. Each device is a project folder of its own (its own `.proto`, framing, commands, telemetry and simulator), and the main project lists the others:
+
+```toml
+[[devices]]
+name = "ref"
+project = "../demo-reference"
+profile = "sim"
+```
+
+The project's own device is `main`. Every device gets its own connection, I/O thread, framer, codec, link statistics and reconnect logic, and all of them share one clock, so their samples sit on one time axis.
+
+- **Channels** of other devices are named `<device>.<channel>` (`ref.reading.vout_mv`); `main`'s keep their plain names, so existing layouts and sequences work unchanged. A derived channel of the main project can combine devices: the demo's `err_mv = telemetry.vout_raw * 0.0503 - ref.reading.vout_mv` is the sensor minus the meter, computed for every sensor sample with the meter's newest reading.
+- **Sequences** address a device with `device = "ref"` on `send`, `expect` and `capture` (see the configuration reference). The demo's `sequences/compare.toml` pings both devices, sets the sensor's bias, captures both outputs and checks that `err_mv` averages to zero. A run whose steps need a device that is not connected stops before the first step and names it.
+- **Scripts** send to another device with `send("ref:Ping")` or through `device("ref")`, whose `last` and `stats` take the device's own channel names.
+- **Recording** puts every device into one `.pbsession` file; decoding, CSV, Parquet and MCAP use the same names as the live view, and other devices' MCAP and Foxglove topics live under `/ref/…`. A replay profile in a device's project plays that device's part of a recording.
+- **Two identical boards** can be one project listed twice: `project = "."` with a second profile, told apart by `usb_serial`.
+
+`protobench check` checks the device list (names, paths, nesting, profiles), the devices named in sequences, and channels and derived-expression variables across devices.
+
 ## Main window
 
 - **Menu bar**: File, Connection, Record, View, Tools, Help.
@@ -241,11 +262,12 @@ Scripts are sandboxed: no file, network or module access, at most 50 million ope
 ```
 protobench list-ports [--json]
 protobench schema   --project <dir> [--message <type>]
-protobench send     --project <dir> [--profile <name>] [--port <p>] --command <name> [--set field=value ...] [--wait]
-protobench monitor  --project <dir> [--profile <name>] [--port <p>] [--json] [--channels a,b] [--send <cmd>] [--duration <s>] [--record <file>]
+protobench send     --project <dir> [--device <name>] [--profile <name>] [--port <p>] --command <name> [--set field=value ...] [--wait]
+protobench monitor  --project <dir> [--profile [<device>=]<name>]... [--port [<device>=]<p>]... [--only <devices>]
+                    [--json] [--channels a,b] [--send [<device>:]<cmd>] [--duration <s>] [--record <file>]
                     [--foxglove <port>] [--foxglove-bind <addr>]
-protobench run      --project <dir> --sequence <name> [--profile <name>] [--port <p>] [--report-dir <d>]
-                    [--non-interactive fail|continue] [--var <name>=<value>]...
+protobench run      --project <dir> --sequence <name> [--profile [<device>=]<name>]... [--port [<device>=]<p>]...
+                    [--only <devices>] [--report-dir <d>] [--non-interactive fail|continue] [--var <name>=<value>]...
 protobench check    --project <dir> [--json]
 protobench decode   <file.pbsession> [--json] [--csv out.csv] [--parquet out.parquet] [--mcap out.mcap]
                     [--channels a,b] [--range <t0>:<t1>] [--per-channel]
@@ -260,6 +282,8 @@ protobench sim      --project <dir> [--tcp <port>] [--bind <addr>]
 - `check` checks a project without connecting: `project.toml`, the schema, every sequence (commands, messages, assertion and `save` paths, channels, statistics, scripts that do not compile, `${vars}` nothing defines) and the channels in `layout.json`. Findings print as `file:line: error|warning: message`; the exit code is **1** if there is any error, **0** otherwise, so it fits a CI step.
 - `decode` prints a recording (`--json`: one object per record), or exports its channels to CSV or Parquet and its messages to MCAP. `--channels` limits the export to some channels, `--range 12.5:20` to a time window in seconds (either side may be empty), and `--per-channel` writes one CSV per channel.
 - `sim` runs the project's simulator as a TCP server (default port 9000). Point a `tcp_client` profile at it to test the real network path.
+
+With `[[devices]]` (see *Multiple devices*), `monitor` and `run` start every device; `--only main` (comma-separated names) starts only some. `--profile` and `--port` take `DEVICE=VALUE` for another device and a bare value for `main`: `protobench run --project . --sequence compare --profile usb --profile ref=usb --port ref=COM7`. `send --device ref` connects only that device, and there a bare `--profile`/`--port` is the target's own. `monitor` tags other devices' output (`ref:reading`, and `"device": "ref"` in JSON) and `--send "ref:Start Stream"` sends to one of them.
 
 `--log debug` (or `info`, `pb_core=trace`, …) prints diagnostics to stderr.
 

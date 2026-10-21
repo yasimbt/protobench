@@ -241,6 +241,45 @@ pub fn validate(c: &ProjectConfig) -> Vec<Finding> {
         }
     }
 
+    // devices
+    let mut names = HashSet::new();
+    for (i, d) in c.devices.iter().enumerate() {
+        if !is_device_name(&d.name) {
+            f.err(
+                key_path!["devices", i, "name"],
+                format!(
+                    "device name `{}` must start with a letter or `_` and contain only letters, digits and `_`",
+                    d.name
+                ),
+            );
+        } else if d.name == MAIN_DEVICE {
+            f.err(
+                key_path!["devices", i, "name"],
+                "`main` is this project's own device; pick another name".into(),
+            );
+        } else if !names.insert(d.name.as_str()) {
+            f.err(
+                key_path!["devices", i, "name"],
+                format!("duplicate device name `{}`", d.name),
+            );
+        }
+        if d.project.trim().is_empty() {
+            f.err(
+                key_path!["devices", i],
+                format!("device `{}` needs `project` (a project folder)", d.name),
+            );
+        }
+    }
+    if c.devices.len() >= MAX_DEVICES {
+        f.err(
+            key_path!["devices", MAX_DEVICES - 1],
+            format!(
+                "at most {MAX_DEVICES} devices including this project's own; {} are listed",
+                c.devices.len() + 1
+            ),
+        );
+    }
+
     // simulator
     let sim = &c.simulator;
     for (k, v) in [

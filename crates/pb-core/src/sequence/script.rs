@@ -21,6 +21,12 @@
 //! error}` with `status` one of `"ok"`, `"sent"`, `"timeout"`, `"error"`.
 //! A script that throws (or calls `fail`) fails the step; any other runtime
 //! problem (a type error, a limit, an abort) is a step error.
+//!
+//! With several devices, `send("ref:Ping")` and `send_msg("ref:set_rate",
+//! …)` address device `ref`, and channels have their full names
+//! (`last("ref.reading.vout_mv")`). `device("ref")` returns a handle with
+//! the same `send`, `send_msg`, `last` and `stats`, where channel names are
+//! the device's own (`device("ref").last("reading.vout_mv")`).
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -40,12 +46,21 @@ use crate::telemetry::stats_of;
 /// Most operations a script may perform.
 pub const MAX_OPERATIONS: u64 = 50_000_000;
 
+/// A device a script can talk to.
+#[derive(Clone)]
+pub struct ScriptDevice {
+    /// Device name (`main` for the project's own).
+    pub name: String,
+    /// Its session.
+    pub session: SessionHandle,
+    /// Its project configuration (commands).
+    pub config: Arc<ProjectConfig>,
+}
+
 /// What a script needs from the run.
 pub struct ScriptEnv {
-    /// The device session.
-    pub session: SessionHandle,
-    /// Project configuration (commands).
-    pub config: Arc<ProjectConfig>,
+    /// The connected devices, `main` first.
+    pub devices: Vec<ScriptDevice>,
     /// Sequence variables before the script.
     pub vars: BTreeMap<String, Json>,
     /// Set to abort the run.
@@ -140,6 +155,117 @@ fn outcome_map(out: Result<RequestOutcome, String>) -> Map {
     m
 }
 
+/// The script's view of the devices.
+#[derive(Clone)]
+struct Api {
+    devices: Arc<Vec<ScriptDevice>>,
+    state: Shared,
+}
+
+impl Api {
+    /// `"ref:Ping"` → (index of `ref`, `"Ping"`) when `ref` is a connected
+    /// device; anything else is `main`'s (the first device).
+    fn split<'s>(&self, s: &'s str) -> (usize, &'s str) {
+        if let Some((dev, rest)) = s.split_once(':') {
+            if let Some(i) = self.devices.iter().position(|d| d.name == dev) {
+                return (i, rest);
+            }
+        }
+        (0, s)
+    }
+
+    fn send_req(&self, d: usize, r: Result<SendRequest, String>) -> Map {
+        let Some(dev) = self.devices.get(d) else {
+            return outcome_map(Err("no device is connected".into()));
+        };
+        outcome_map(r.map(|req| dev.session.send_and_wait(req)))
+    }
+
+    fn send_cmd(&self, d: usize, name: &str, overrides: &Map) -> Map {
+        let built = (|| {
+            let dev = self.devices.get(d).ok_or("no device is connected")?;
+            let cmd = dev.config.command(name).ok_or_else(|| {
+                if dev.name == crate::config::MAIN_DEVICE {
+                    format!("no command `{name}` in project.toml")
+                } else {
+                    format!("no command `{name}` on device `{}`", dev.name)
+                }
+            })?;
+            let ov: Vec<(String, Json)> = overrides
+                .iter()
+                .map(|(k, v)| (k.to_string(), from_dyn(v)))
+                .collect();
+            let vars = self.state.lock().vars.clone();
+            build_command(&dev.config, dev.session.codec(), cmd, &ov, &vars)
+                .map_err(|e| e.to_string())
+        })();
+        self.send_req(d, built)
+    }
+
+    fn send_msg(&self, d: usize, msg: &str, payload: &Map, expect: Option<&str>) -> Map {
+        let built = (|| {
+            let dev = self.devices.get(d).ok_or("no device is connected")?;
+            build_inline(
+                &dev.config,
+                dev.session.codec(),
+                msg,
+                from_dyn(&Dynamic::from_map(payload.clone())),
+                expect,
+                None,
+                None,
+            )
+            .map_err(|e| e.to_string())
+        })();
+        self.send_req(d, built)
+    }
+
+    /// The telemetry store all devices share.
+    fn store(&self) -> Option<Arc<crate::telemetry::TelemetryStore>> {
+        self.devices.first().map(|d| d.session.telemetry().clone())
+    }
+
+    fn last(&self, ch: &str) -> Dynamic {
+        self.store()
+            .and_then(|s| s.get(ch))
+            .and_then(|c| c.last())
+            .map(|(_, v)| Dynamic::from_float(v))
+            .unwrap_or(Dynamic::UNIT)
+    }
+
+    fn stats(&self, ch: &str, ms: Option<i64>) -> Dynamic {
+        let Some(c) = self.store().and_then(|s| s.get(ch)) else {
+            return Dynamic::UNIT;
+        };
+        let Some(ms) = ms else {
+            return to_dyn(&serde_json::to_value(c.stats()).unwrap_or(Json::Null));
+        };
+        let data = c.data.read();
+        let Some((t_last, _)) = data.ring.last() else {
+            return Dynamic::UNIT;
+        };
+        let window = ms.max(0) as f64 / 1000.0;
+        let samples: Vec<(f64, f64)> = data.ring.range(t_last - window, f64::INFINITY).collect();
+        to_dyn(&serde_json::to_value(stats_of(&samples, Some(window))).unwrap_or(Json::Null))
+    }
+}
+
+/// `device("ref")` in a script.
+#[derive(Clone)]
+struct DeviceApi {
+    api: Api,
+    index: usize,
+}
+
+impl DeviceApi {
+    /// A channel of this device by its own name.
+    fn channel(&self, ch: &str) -> String {
+        format!(
+            "{}{ch}",
+            crate::config::channel_prefix(&self.api.devices[self.index].name)
+        )
+    }
+}
+
 /// Runs a script to completion.
 pub fn run_script(code: &str, env: ScriptEnv) -> ScriptOutcome {
     let state: Shared = Arc::new(Mutex::new(State {
@@ -182,94 +308,89 @@ pub fn run_script(code: &str, env: ScriptEnv) -> ScriptOutcome {
         st.lock().vars.insert(name.to_string(), from_dyn(&v));
     });
 
-    // Sending.
-    let send_req = {
-        let session = env.session.clone();
-        move |r: Result<SendRequest, String>| -> Map {
-            outcome_map(r.map(|req| session.send_and_wait(req)))
-        }
+    // Devices, sending and telemetry.
+    let api = Api {
+        devices: Arc::new(env.devices),
+        state: state.clone(),
     };
     {
-        let (st, cfg, session, send) = (
-            state.clone(),
-            env.config.clone(),
-            env.session.clone(),
-            send_req.clone(),
-        );
-        let build = move |name: &str, overrides: &Map| -> Result<SendRequest, String> {
-            let cmd = cfg
-                .command(name)
-                .ok_or_else(|| format!("no command `{name}` in project.toml"))?;
-            let ov: Vec<(String, Json)> = overrides
-                .iter()
-                .map(|(k, v)| (k.to_string(), from_dyn(v)))
-                .collect();
-            let vars = st.lock().vars.clone();
-            build_command(&cfg, session.codec(), cmd, &ov, &vars).map_err(|e| e.to_string())
-        };
-        let (b1, s1) = (build.clone(), send.clone());
+        let a = api.clone();
         engine.register_fn("send", move |name: &str| -> Map {
-            s1(b1(name, &Map::new()))
+            let (d, rest) = a.split(name);
+            a.send_cmd(d, rest, &Map::new())
         });
+        let a = api.clone();
         engine.register_fn("send", move |name: &str, ov: Map| -> Map {
-            send(build(name, &ov))
+            let (d, rest) = a.split(name);
+            a.send_cmd(d, rest, &ov)
         });
-    }
-    {
-        let (cfg, session) = (env.config.clone(), env.session.clone());
-        let build = move |msg: &str, payload: &Map, expect: Option<&str>| {
-            build_inline(
-                &cfg,
-                session.codec(),
-                msg,
-                from_dyn(&Dynamic::from_map(payload.clone())),
-                expect,
-                None,
-                None,
-            )
-            .map_err(|e| e.to_string())
-        };
-        let (b1, s1) = (build.clone(), send_req.clone());
+        let a = api.clone();
         engine.register_fn("send_msg", move |msg: &str, p: Map| -> Map {
-            s1(b1(msg, &p, None))
+            let (d, rest) = a.split(msg);
+            a.send_msg(d, rest, &p, None)
         });
-        let send = send_req;
+        let a = api.clone();
         engine.register_fn("send_msg", move |msg: &str, p: Map, expect: &str| -> Map {
-            send(build(msg, &p, Some(expect)))
+            let (d, rest) = a.split(msg);
+            a.send_msg(d, rest, &p, Some(expect))
         });
-    }
-
-    // Telemetry.
-    let store = env.session.telemetry().clone();
-    {
-        let store = store.clone();
-        engine.register_fn("last", move |ch: &str| -> Dynamic {
-            store
-                .get(ch)
-                .and_then(|c| c.last())
-                .map(|(_, v)| Dynamic::from_float(v))
-                .unwrap_or(Dynamic::UNIT)
+        let a = api.clone();
+        engine.register_fn("last", move |ch: &str| a.last(ch));
+        let a = api.clone();
+        engine.register_fn("stats", move |ch: &str| a.stats(ch, None));
+        let a = api.clone();
+        engine.register_fn("stats", move |ch: &str, ms: i64| a.stats(ch, Some(ms)));
+        let a = api.clone();
+        engine.register_type_with_name::<DeviceApi>("Device");
+        engine.register_fn(
+            "device",
+            move |name: &str| -> Result<DeviceApi, Box<EvalAltResult>> {
+                match a.devices.iter().position(|d| d.name == name) {
+                    Some(index) => Ok(DeviceApi {
+                        api: a.clone(),
+                        index,
+                    }),
+                    None => Err(Box::new(EvalAltResult::ErrorRuntime(
+                        format!(
+                            "no connected device `{name}` (connected: {})",
+                            a.devices
+                                .iter()
+                                .map(|d| d.name.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                        .into(),
+                        Position::NONE,
+                    ))),
+                }
+            },
+        );
+        engine.register_get("name", |d: &mut DeviceApi| -> String {
+            d.api.devices[d.index].name.clone()
         });
-    }
-    {
-        let s1 = store.clone();
-        engine.register_fn("stats", move |ch: &str| -> Dynamic {
-            s1.get(ch)
-                .map(|c| to_dyn(&serde_json::to_value(c.stats()).unwrap_or(Json::Null)))
-                .unwrap_or(Dynamic::UNIT)
+        engine.register_fn("send", |d: &mut DeviceApi, name: &str| -> Map {
+            d.api.send_cmd(d.index, name, &Map::new())
         });
-        engine.register_fn("stats", move |ch: &str, ms: i64| -> Dynamic {
-            let Some(c) = store.get(ch) else {
-                return Dynamic::UNIT;
-            };
-            let data = c.data.read();
-            let Some((t_last, _)) = data.ring.last() else {
-                return Dynamic::UNIT;
-            };
-            let window = ms.max(0) as f64 / 1000.0;
-            let samples: Vec<(f64, f64)> =
-                data.ring.range(t_last - window, f64::INFINITY).collect();
-            to_dyn(&serde_json::to_value(stats_of(&samples, Some(window))).unwrap_or(Json::Null))
+        engine.register_fn("send", |d: &mut DeviceApi, name: &str, ov: Map| -> Map {
+            d.api.send_cmd(d.index, name, &ov)
+        });
+        engine.register_fn("send_msg", |d: &mut DeviceApi, msg: &str, p: Map| -> Map {
+            d.api.send_msg(d.index, msg, &p, None)
+        });
+        engine.register_fn(
+            "send_msg",
+            |d: &mut DeviceApi, msg: &str, p: Map, expect: &str| -> Map {
+                d.api.send_msg(d.index, msg, &p, Some(expect))
+            },
+        );
+        engine.register_fn("last", |d: &mut DeviceApi, ch: &str| {
+            d.api.last(&d.channel(ch))
+        });
+        engine.register_fn("stats", |d: &mut DeviceApi, ch: &str| {
+            d.api.stats(&d.channel(ch), None)
+        });
+        engine.register_fn("stats", |d: &mut DeviceApi, ch: &str, ms: i64| {
+            d.api.stats(&d.channel(ch), Some(ms))
         });
     }
 
@@ -391,8 +512,11 @@ mod tests {
         run_script(
             code,
             ScriptEnv {
-                session: s.handle(),
-                config,
+                devices: vec![ScriptDevice {
+                    name: "main".into(),
+                    session: s.handle(),
+                    config,
+                }],
                 vars,
                 abort,
                 timeout: Duration::from_millis(timeout_ms),

@@ -73,6 +73,17 @@ pub struct RunOptions {
     pub vars: Vec<(String, Json)>,
 }
 
+/// A device a sequence can use: `main` and the `[[devices]]` entries.
+#[derive(Clone, Copy)]
+pub struct Target<'a> {
+    /// Device name.
+    pub name: &'a str,
+    /// Its session; None while it is configured but not connected.
+    pub session: Option<&'a Session>,
+    /// Its project config (commands, messages).
+    pub config: &'a ProjectConfig,
+}
+
 /// Most messages kept for `expect` steps.
 const INBOX_MAX: usize = 50_000;
 
@@ -155,9 +166,18 @@ impl Inbox {
     }
 }
 
-struct Ctx<'a> {
-    session: &'a Session,
+struct Dev<'a> {
+    name: &'a str,
+    session: Option<&'a Session>,
     config: &'a ProjectConfig,
+    /// Messages received from this device, for `expect`.
+    inbox: Option<Inbox>,
+}
+
+struct Ctx<'a> {
+    devs: Vec<Dev<'a>>,
+    /// A connected session, for the time base (all devices share one clock).
+    clock: &'a Session,
     seq: &'a SequenceFile,
     vars: BTreeMap<String, Json>,
     failed: bool,
@@ -167,7 +187,6 @@ struct Ctx<'a> {
     prompt: Option<PromptFn<'a>>,
     headless: NonInteractive,
     abort: Arc<AtomicBool>,
-    inbox: Inbox,
     /// Session time when the current step started.
     step_start_ns: u64,
     /// Session time when the previous step started: `expect` matches
@@ -220,11 +239,81 @@ impl Outcome {
     }
 }
 
-/// Runs `seq` on `session` and returns the report. `on_event` gets live
-/// progress; `prompt` answers `prompt_operator` steps (None = headless).
+/// Runs `seq` on `session` (the project's own device) and returns the
+/// report. `on_event` gets live progress; `prompt` answers
+/// `prompt_operator` steps (None = headless).
 pub fn run_sequence<'a>(
     session: &'a Session,
     config: &'a ProjectConfig,
+    seq: &'a SequenceFile,
+    opts: RunOptions,
+    on_event: &'a mut dyn FnMut(RunEvent),
+    prompt: Option<PromptFn<'a>>,
+) -> RunReport {
+    let targets = [Target {
+        name: crate::config::MAIN_DEVICE,
+        session: Some(session),
+        config,
+    }];
+    run_sequence_on(&targets, seq, opts, on_event, prompt)
+}
+
+/// Device names that steps (and loops) name with `device = …`.
+fn named_devices(steps: &[Step], out: &mut Vec<String>) {
+    for s in steps {
+        if let Some(d) = s.device() {
+            if !out.iter().any(|x| x == d) {
+                out.push(d.to_string());
+            }
+        }
+        if let Step::Loop { steps, .. } = s {
+            named_devices(steps, out);
+        }
+    }
+}
+
+/// Why the devices the steps name cannot be used, if they cannot.
+fn device_problem(targets: &[Target<'_>], steps: &[Step]) -> Option<String> {
+    if targets.iter().all(|t| t.session.is_none()) {
+        return Some("no device is connected".into());
+    }
+    let mut named = Vec::new();
+    named_devices(steps, &mut named);
+    for d in named {
+        match targets.iter().find(|t| t.name == d) {
+            None => {
+                return Some(format!(
+                    "no device `{d}` (this project has {})",
+                    targets
+                        .iter()
+                        .map(|t| format!("`{}`", t.name))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ))
+            }
+            Some(Target { session: None, .. }) => {
+                return Some(format!("device `{d}` is not connected"))
+            }
+            Some(Target {
+                session: Some(s), ..
+            }) if !s.state().is_connected() => {
+                return Some(format!(
+                    "device `{d}` is not connected ({})",
+                    s.state().label()
+                ))
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Runs `seq` with several devices: `targets` lists every device of the
+/// project (`main` first), connected or not. A run whose steps name a
+/// device that is missing or not connected fails at the start with one
+/// `devices` error step.
+pub fn run_sequence_on<'a>(
+    targets: &'a [Target<'a>],
     seq: &'a SequenceFile,
     opts: RunOptions,
     on_event: &'a mut dyn FnMut(RunEvent),
@@ -238,9 +327,78 @@ pub fn run_sequence<'a>(
         .map(|(k, v)| (k.clone(), toml_to_json(v)))
         .collect();
     vars.extend(opts.vars);
+    let main = targets
+        .iter()
+        .find(|t| t.name == crate::config::MAIN_DEVICE)
+        .or(targets.first());
+    let project = main.map(|t| t.config.name.clone()).unwrap_or_default();
+    let connected: Vec<&Target> = targets.iter().filter(|t| t.session.is_some()).collect();
+    let endpoint = match connected.as_slice() {
+        [one] if one.name == crate::config::MAIN_DEVICE => {
+            one.session.map(|s| s.endpoint()).unwrap_or_default()
+        }
+        many => many
+            .iter()
+            .map(|t| {
+                format!(
+                    "{}: {}",
+                    t.name,
+                    t.session.map(|s| s.endpoint()).unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; "),
+    };
+    let mut report = RunReport {
+        sequence: seq.name.clone(),
+        description: seq.description.clone(),
+        project,
+        endpoint,
+        tool_version: crate::VERSION.to_string(),
+        started,
+        duration_s: 0.0,
+        passed: false,
+        aborted: false,
+        summary: Summary::default(),
+        steps: Vec::new(),
+        vars: vars.clone(),
+        log: Vec::new(),
+    };
+    let problem = device_problem(targets, &seq.steps);
+    let clock = main
+        .and_then(|t| t.session)
+        .or_else(|| connected.first().and_then(|t| t.session));
+    let (Some(clock), None) = (clock, problem.clone()) else {
+        let message = problem.unwrap_or_else(|| "no device is connected".into());
+        let step = StepReport {
+            index: "0".into(),
+            action: "devices".into(),
+            label: "check devices".into(),
+            status: StepStatus::Error,
+            duration_ms: 0.0,
+            message: Some(message),
+            measured: BTreeMap::new(),
+            assertions: Vec::new(),
+        };
+        on_event(RunEvent::StepFinished(step.clone()));
+        report.steps.push(step);
+        report.duration_s = t0.elapsed().as_secs_f64();
+        report.finalize();
+        on_event(RunEvent::Finished(Box::new(report.clone())));
+        return report;
+    };
+    let devs = targets
+        .iter()
+        .map(|t| Dev {
+            name: t.name,
+            session: t.session,
+            config: t.config,
+            inbox: t.session.map(|s| Inbox::new(s.subscribe())),
+        })
+        .collect();
     let mut ctx = Ctx {
-        session,
-        config,
+        devs,
+        clock,
         seq,
         vars,
         failed: false,
@@ -253,33 +411,25 @@ pub fn run_sequence<'a>(
             .or(seq.non_interactive)
             .unwrap_or(NonInteractive::Fail),
         abort: opts.abort,
-        inbox: Inbox::new(session.subscribe()),
-        step_start_ns: session.now_ns(),
-        prev_step_start_ns: session.now_ns(),
+        step_start_ns: clock.now_ns(),
+        prev_step_start_ns: clock.now_ns(),
     };
     ctx.run_steps(&seq.steps, "");
     let aborted = ctx.abort.load(Ordering::Relaxed);
     let mut report = RunReport {
-        sequence: seq.name.clone(),
-        description: seq.description.clone(),
-        project: config.name.clone(),
-        endpoint: session.endpoint(),
-        tool_version: crate::VERSION.to_string(),
-        started,
-        duration_s: t0.elapsed().as_secs_f64(),
-        passed: false,
         aborted,
-        summary: Summary::default(),
+        duration_s: t0.elapsed().as_secs_f64(),
         steps: std::mem::take(&mut ctx.steps),
         vars: ctx.vars.clone(),
         log: std::mem::take(&mut ctx.log),
+        ..report
     };
     report.finalize();
     (ctx.on_event)(RunEvent::Finished(Box::new(report.clone())));
     report
 }
 
-impl Ctx<'_> {
+impl<'a> Ctx<'a> {
     fn log_line(&mut self, s: String) {
         self.log.push(s.clone());
         (self.on_event)(RunEvent::Log(s));
@@ -328,9 +478,12 @@ impl Ctx<'_> {
         });
         let t = Instant::now();
         self.prev_step_start_ns = self.step_start_ns;
-        self.step_start_ns = self.session.now_ns();
-        self.inbox.drain();
-        self.inbox.prune(self.prev_step_start_ns);
+        self.step_start_ns = self.clock.now_ns();
+        let prune = self.prev_step_start_ns;
+        for inbox in self.devs.iter_mut().filter_map(|d| d.inbox.as_mut()) {
+            inbox.drain();
+            inbox.prune(prune);
+        }
         let out = self.exec(step);
         if matches!(out.status, StepStatus::Fail | StepStatus::Error) {
             self.failed = true;
@@ -357,7 +510,9 @@ impl Ctx<'_> {
             if self.abort.load(Ordering::Relaxed) {
                 return false;
             }
-            self.inbox.drain();
+            for inbox in self.devs.iter_mut().filter_map(|d| d.inbox.as_mut()) {
+                inbox.drain();
+            }
             std::thread::sleep((end - Instant::now()).min(Duration::from_millis(10)));
         }
         true
@@ -366,6 +521,7 @@ impl Ctx<'_> {
     fn exec(&mut self, step: &Step) -> Outcome {
         match step {
             Step::Send {
+                device,
                 command,
                 message,
                 payload,
@@ -375,6 +531,7 @@ impl Ctx<'_> {
                 assert,
                 save,
             } => self.send(
+                device.as_deref(),
                 command.as_deref(),
                 message.as_deref(),
                 payload.as_ref(),
@@ -392,17 +549,26 @@ impl Ctx<'_> {
                 }
             }
             Step::Expect {
+                device,
                 message,
                 timeout_ms,
                 assert,
-            } => self.expect(message, *timeout_ms, assert),
+            } => self.expect(device.as_deref(), message, *timeout_ms, assert),
             Step::Capture {
+                device,
                 channels,
                 duration_ms,
                 samples,
                 timeout_ms,
                 assert,
-            } => self.capture(channels, *duration_ms, *samples, *timeout_ms, assert),
+            } => self.capture(
+                device.as_deref(),
+                channels,
+                *duration_ms,
+                *samples,
+                *timeout_ms,
+                assert,
+            ),
             Step::Set { var, value, vars } => {
                 let mut set = |k: &str, v: &toml::Value| -> Result<(), String> {
                     let j =
@@ -513,9 +679,25 @@ impl Ctx<'_> {
         o
     }
 
+    /// The device a step talks to (`main` when it names none).
+    fn dev(&self, name: Option<&str>) -> Result<(&'a Session, &'a ProjectConfig, usize), String> {
+        let name = name.unwrap_or(crate::config::MAIN_DEVICE);
+        let i = self
+            .devs
+            .iter()
+            .position(|d| d.name == name)
+            .ok_or_else(|| format!("no device `{name}`"))?;
+        let d = &self.devs[i];
+        let s = d
+            .session
+            .ok_or_else(|| format!("device `{name}` is not connected"))?;
+        Ok((s, d.config, i))
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn send(
         &mut self,
+        device: Option<&str>,
         command: Option<&str>,
         message: Option<&str>,
         payload: Option<&toml::Table>,
@@ -525,12 +707,23 @@ impl Ctx<'_> {
         asserts: &[Assertion],
         save: &toml::Table,
     ) -> Outcome {
-        let codec = self.session.codec();
+        let (session, config, di) = match self.dev(device) {
+            Ok(d) => d,
+            Err(e) => return Outcome::error(e),
+        };
+        let codec = session.codec();
         let built = match (command, message) {
             (Some(name), _) => {
                 let name = interpolate(name, &self.vars).unwrap_or_else(|_| name.to_string());
-                let Some(cmd) = self.config.command(&name) else {
-                    return Outcome::error(format!("no command `{name}` in project.toml"));
+                let Some(cmd) = config.command(&name) else {
+                    return Outcome::error(format!(
+                        "no command `{name}` in {}",
+                        if di == 0 && device.is_none() {
+                            "project.toml".to_string()
+                        } else {
+                            format!("the project of device `{}`", self.devs[di].name)
+                        }
+                    ));
                 };
                 let overrides = match payload {
                     Some(p) => match substitute_vars(table_to_json(p), &self.vars) {
@@ -540,7 +733,7 @@ impl Ctx<'_> {
                     },
                     None => Vec::new(),
                 };
-                build_command(self.config, codec, cmd, &overrides, &self.vars)
+                build_command(config, codec, cmd, &overrides, &self.vars)
             }
             (None, Some(m)) => {
                 let p = match substitute_vars(
@@ -552,7 +745,7 @@ impl Ctx<'_> {
                     Ok(p) => p,
                     Err(e) => return Outcome::error(e.to_string()),
                 };
-                build_inline(self.config, codec, m, p, None, None, None)
+                build_inline(config, codec, m, p, None, None, None)
             }
             (None, None) => return Outcome::error("send needs `command` or `message`"),
         };
@@ -575,7 +768,7 @@ impl Ctx<'_> {
         if req.expect.is_none() && asserts.iter().any(|a| a.path.is_some()) {
             return Outcome::error("field assertions need an expected reply (`expect`)");
         }
-        let out = self.session.send_and_wait(req);
+        let out = session.send_and_wait(req);
         let mut o = Outcome::pass();
         match out {
             RequestOutcome::Sent => {}
@@ -584,7 +777,9 @@ impl Ctx<'_> {
                 latency_ns,
                 attempts,
             } => {
-                self.inbox.claim(&response);
+                if let Some(inbox) = self.devs[di].inbox.as_mut() {
+                    inbox.claim(&response);
+                }
                 o.measured.insert("response".into(), response.to_json());
                 o.measured
                     .insert("latency_ms".into(), Json::from(latency_ns as f64 / 1e6));
@@ -620,9 +815,19 @@ impl Ctx<'_> {
     }
 
     fn script(&mut self, code: &str, timeout_ms: u64) -> Outcome {
+        let devices = self
+            .devs
+            .iter()
+            .filter_map(|d| {
+                Some(super::script::ScriptDevice {
+                    name: d.name.to_string(),
+                    session: d.session?.handle(),
+                    config: Arc::new(d.config.clone()),
+                })
+            })
+            .collect();
         let env = super::script::ScriptEnv {
-            session: self.session.handle(),
-            config: Arc::new(self.config.clone()),
+            devices,
             vars: self.vars.clone(),
             abort: self.abort.clone(),
             timeout: Duration::from_millis(timeout_ms),
@@ -657,7 +862,7 @@ impl Ctx<'_> {
 
     fn check_channel_last(&self, a: &Assertion) -> AssertionResult {
         let ch = a.channel.clone().unwrap_or_default();
-        let m = match self.session.telemetry().get(&ch) {
+        let m = match self.clock.telemetry().get(&ch) {
             None => Err(format!("no channel `{ch}`")),
             Some(c) => match c.last() {
                 Some((_, v)) => Ok(Measured::Num(v)),
@@ -667,32 +872,42 @@ impl Ctx<'_> {
         check(a, &ch, m)
     }
 
-    fn expect(&mut self, message: &str, timeout_ms: u64, asserts: &[Assertion]) -> Outcome {
-        let codec = self.session.codec().clone();
+    fn expect(
+        &mut self,
+        device: Option<&str>,
+        message: &str,
+        timeout_ms: u64,
+        asserts: &[Assertion],
+    ) -> Outcome {
+        let (session, _, di) = match self.dev(device) {
+            Ok(d) => d,
+            Err(e) => return Outcome::error(e),
+        };
+        let codec = session.codec().clone();
         let target = match codec.resolve_rx(message) {
             Ok(t) => t,
             Err(e) => return Outcome::error(e.to_string()),
         };
         let since = self.prev_step_start_ns;
         let deadline = Instant::now() + Duration::from_millis(timeout_ms);
-        self.inbox.drain();
-        let mut found = self.inbox.take(since, |m| codec.matches(m, &target));
+        let abort = self.abort.clone();
+        let Some(inbox) = self.devs[di].inbox.as_mut() else {
+            return Outcome::error("internal: no inbox");
+        };
+        inbox.drain();
+        let mut found = inbox.take(since, |m| codec.matches(m, &target));
         while found.is_none() {
-            if self.abort.load(Ordering::Relaxed) {
+            if abort.load(Ordering::Relaxed) {
                 return Outcome::error("aborted");
             }
             let left = deadline.saturating_duration_since(Instant::now());
             if left.is_zero() {
                 return Outcome::fail(format!("no `{message}` within {timeout_ms} ms"));
             }
-            if let Ok(ev) = self
-                .inbox
-                .rx
-                .recv_timeout(left.min(Duration::from_millis(20)))
-            {
-                if let Some(m) = self.inbox.accept(ev) {
+            if let Ok(ev) = inbox.rx.recv_timeout(left.min(Duration::from_millis(20))) {
+                if let Some(m) = inbox.accept(ev) {
                     if m.host_ts_ns >= since && codec.matches(&m, &target) {
-                        found = self.inbox.msgs.pop_back();
+                        found = inbox.msgs.pop_back();
                     }
                 }
             }
@@ -708,18 +923,36 @@ impl Ctx<'_> {
 
     fn capture(
         &mut self,
+        device: Option<&str>,
         channels: &[String],
         duration_ms: Option<u64>,
         samples: Option<usize>,
         timeout_ms: u64,
         asserts: &[Assertion],
     ) -> Outcome {
-        let store = self.session.telemetry().clone();
+        let (session, _, di) = match self.dev(device) {
+            Ok(d) => d,
+            Err(e) => return Outcome::error(e),
+        };
+        let store = session.telemetry().clone();
+        // With a device, names are that device's own channels.
+        let prefix = match device {
+            Some(_) => crate::config::channel_prefix(self.devs[di].name),
+            None => String::new(),
+        };
+        let channels: Vec<String> = channels.iter().map(|c| format!("{prefix}{c}")).collect();
+        let asserts: Vec<Assertion> = asserts
+            .iter()
+            .map(|a| Assertion {
+                channel: a.channel.as_ref().map(|c| format!("{prefix}{c}")),
+                ..a.clone()
+            })
+            .collect();
         let mark = |name: &str| store.get(name).map(|c| c.total()).unwrap_or(0);
         // Every channel the step names, listed or only asserted on, is
         // measured over the capture window alone.
         let mut names: Vec<String> = channels.to_vec();
-        for a in asserts {
+        for a in &asserts {
             if let Some(ch) = &a.channel {
                 if !ch.is_empty() && !names.contains(ch) {
                     names.push(ch.clone());
@@ -771,7 +1004,7 @@ impl Ctx<'_> {
             }
             stats.push((name.clone(), snap));
         }
-        for a in asserts {
+        for a in &asserts {
             o.assertions.push(check_stat(a, &stats));
         }
         if stats.iter().all(|(_, s)| s.is_none()) && asserts.is_empty() {

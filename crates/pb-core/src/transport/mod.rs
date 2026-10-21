@@ -82,9 +82,30 @@ pub type Connector = Box<dyn FnMut() -> Result<Box<dyn Transport>, CoreError> + 
 /// Factory for the in-process simulator transport (provided by `pb-sim`).
 pub type SimFactory = Arc<dyn Fn() -> Result<Box<dyn Transport>, CoreError> + Send + Sync>;
 
-/// Builds a connector for a profile. `sim` is required for `transport = "sim"`.
-/// `port_override` replaces the serial port or `host:port` for TCP/UDP.
+/// Builds a connector for a profile of `main`. `sim` is required for
+/// `transport = "sim"`. `port_override` replaces the serial port or
+/// `host:port` for TCP/UDP.
 pub fn connector(
+    profile: &ConnectionProfile,
+    project_dir: &Path,
+    framing: &FramingConfig,
+    sim: Option<SimFactory>,
+    port_override: Option<String>,
+) -> Result<Connector, CoreError> {
+    connector_for(
+        crate::config::MAIN_DEVICE,
+        profile,
+        project_dir,
+        framing,
+        sim,
+        port_override,
+    )
+}
+
+/// Like [`connector`], for device `device` (a replay plays that device's
+/// records).
+pub fn connector_for(
+    device: &str,
     profile: &ConnectionProfile,
     project_dir: &Path,
     framing: &FramingConfig,
@@ -151,8 +172,11 @@ pub fn connector(
             let path = project_dir.join(file);
             let speed = p.speed;
             let framing = framing.clone();
+            let device = device.to_string();
             Box::new(move || {
-                Ok(Box::new(ReplayTransport::open(&path, speed, &framing)?) as Box<dyn Transport>)
+                Ok(Box::new(ReplayTransport::open_device(
+                    &path, speed, &framing, &device,
+                )?) as Box<dyn Transport>)
             })
         }
     })

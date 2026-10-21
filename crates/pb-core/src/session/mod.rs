@@ -209,6 +209,10 @@ pub struct SessionParams {
     pub rts_idle: bool,
     /// Endpoint description shown until connected.
     pub endpoint: String,
+    /// Device name (`main`, or a `[[devices]]` name).
+    pub device: String,
+    /// Telemetry store shared with other devices; a new one if None.
+    pub telemetry: Option<Arc<TelemetryStore>>,
 }
 
 impl SessionParams {
@@ -230,7 +234,17 @@ impl SessionParams {
             dtr_idle: profile.dtr_on_open,
             rts_idle: profile.rts_on_open,
             endpoint: profile.endpoint(),
+            device: crate::config::MAIN_DEVICE.into(),
+            telemetry: None,
         })
+    }
+
+    /// Makes this the session of device `name`, writing its channels as
+    /// `<name>.<channel>` into the shared `store`.
+    pub fn for_device(mut self, name: &str, store: Arc<TelemetryStore>) -> SessionParams {
+        self.device = name.to_string();
+        self.telemetry = Some(store);
+        self
     }
 }
 
@@ -345,6 +359,7 @@ pub struct Session {
     cmd_tx: Sender<Cmd>,
     thread: Option<JoinHandle<()>>,
     codec: Arc<Codec>,
+    device: String,
 }
 
 impl Session {
@@ -354,8 +369,12 @@ impl Session {
         connector: Connector,
         clock: SharedClock,
     ) -> Result<Session, CoreError> {
-        let telemetry = Arc::new(TelemetryStore::new(params.capacity));
-        let extractor = Extractor::new(&params.config, &params.codec)?;
+        let telemetry = params
+            .telemetry
+            .clone()
+            .unwrap_or_else(|| Arc::new(TelemetryStore::new(params.capacity)));
+        let extractor = Extractor::new(&params.config, &params.codec)?
+            .with_prefix(&crate::config::channel_prefix(&params.device));
         let shared = Arc::new(Shared {
             counters: LinkCounters::default(),
             bad_frames: BadFrames::new(20),
@@ -400,9 +419,10 @@ impl Session {
         }
         let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
         let codec = params.codec.clone();
+        let device = params.device.clone();
         let worker = Worker::new(params, extractor, shared.clone(), polls);
         let thread = std::thread::Builder::new()
-            .name("protobench-io".into())
+            .name(format!("protobench-io-{device}"))
             .spawn(move || worker.run(connector, cmd_rx))
             .map_err(CoreError::IoBare)?;
         Ok(Session {
@@ -410,7 +430,13 @@ impl Session {
             cmd_tx,
             thread: Some(thread),
             codec,
+            device,
         })
+    }
+
+    /// Device name (`main` unless started for another device).
+    pub fn device(&self) -> &str {
+        &self.device
     }
 
     /// The codec used by this session.
@@ -469,6 +495,7 @@ impl Session {
             shared: self.shared.clone(),
             cmd_tx: self.cmd_tx.clone(),
             codec: self.codec.clone(),
+            device: self.device.clone(),
         }
     }
 
@@ -626,9 +653,20 @@ pub struct SessionHandle {
     shared: Arc<Shared>,
     cmd_tx: Sender<Cmd>,
     codec: Arc<Codec>,
+    device: String,
 }
 
 impl SessionHandle {
+    /// Device name.
+    pub fn device(&self) -> &str {
+        &self.device
+    }
+
+    /// Current connection state.
+    pub fn state(&self) -> ConnState {
+        self.shared.state.lock().clone()
+    }
+
     /// Queues a request.
     pub fn send(&self, req: SendRequest) -> RequestHandle {
         queue_send(&self.shared, &self.cmd_tx, req)

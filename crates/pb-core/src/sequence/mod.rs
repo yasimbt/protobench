@@ -13,4 +13,7 @@ pub use assert::{
 pub use input::{InputType, OperatorInput};
 pub use model::{Assertion, NonInteractive, SequenceFile, Step};
 pub use report::{esc as xml_escape, RunReport, StepReport, StepStatus, Summary};
-pub use runner::{run_sequence, OperatorPrompt, PromptAnswer, PromptFn, RunEvent, RunOptions};
+pub use runner::{
+    run_sequence, run_sequence_on, OperatorPrompt, PromptAnswer, PromptFn, RunEvent, RunOptions,
+    Target,
+};

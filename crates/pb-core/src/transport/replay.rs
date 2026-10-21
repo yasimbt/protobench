@@ -36,10 +36,36 @@ pub struct ReplayTransport {
 impl ReplayTransport {
     /// Opens a recording. `speed`: 1.0 = real time, 0 = as fast as possible.
     pub fn open(path: &Path, speed: f64, framing: &FramingConfig) -> Result<Self, CoreError> {
+        Self::open_device(path, speed, framing, crate::config::MAIN_DEVICE)
+    }
+
+    /// Opens a recording and plays the records of `device` (any device of
+    /// a single-device recording).
+    pub fn open_device(
+        path: &Path,
+        speed: f64,
+        framing: &FramingConfig,
+        device: &str,
+    ) -> Result<Self, CoreError> {
         let mut r = SessionReader::open(path)?;
+        let index = r.device_index(device).ok_or_else(|| {
+            CoreError::Transport(format!(
+                "{} has no device `{device}` (it has {})",
+                path.display(),
+                r.header
+                    .devices
+                    .iter()
+                    .map(|d| d.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        })?;
         let framer = build_framer(framing);
         let mut chunks = Vec::new();
         while let Some(rec) = r.next_record()? {
+            if rec.device != index {
+                continue;
+            }
             match rec.kind {
                 RecordKind::RxFrame => {
                     chunks.push((rec.host_ts_ns, Chunk::Bytes(framer.encode(&rec.bytes))))

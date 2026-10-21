@@ -5,7 +5,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::config::{load_config_str, locate_line, CodecMode, ProjectConfig, Seg, TelemetryMode};
+use crate::config::{
+    load_config_str, locate_line, CodecMode, ConnectionProfile, ProjectConfig, Seg, TelemetryMode,
+    MAIN_DEVICE,
+};
 use crate::diag::Diagnostic;
 use crate::key_path;
 use crate::schema::{resolve_field, FieldPath, Schema};
@@ -28,13 +31,45 @@ pub struct Project {
     pub config_ok: bool,
     /// Compiled schema, if it compiled.
     pub schema: Option<Arc<Schema>>,
-    /// Errors and warnings from config, schema and cross-checks.
+    /// Errors and warnings from config, schema and cross-checks, including
+    /// those of the device projects.
     pub diagnostics: Vec<Diagnostic>,
+    /// The other devices of `[[devices]]`, in order (empty for a device
+    /// project itself).
+    pub devices: Vec<DeviceProject>,
+}
+
+/// A device from `[[devices]]` and its loaded project.
+#[derive(Debug, Clone)]
+pub struct DeviceProject {
+    /// Device name.
+    pub name: String,
+    /// Profile to use; the device project's default if None.
+    pub profile: Option<String>,
+    /// The device's project.
+    pub project: Project,
+}
+
+/// A device of a project: its name and project (`main` is the project
+/// itself).
+#[derive(Debug, Clone, Copy)]
+pub struct DeviceRef<'a> {
+    /// Device name.
+    pub name: &'a str,
+    /// The device's project.
+    pub project: &'a Project,
+    /// Profile chosen in `[[devices]]` (always None for `main`).
+    pub profile: Option<&'a str>,
 }
 
 impl Project {
-    /// Opens a project folder (or a `project.toml` path).
+    /// Opens a project folder (or a `project.toml` path), with the device
+    /// projects it lists.
     pub fn open(path: &Path) -> Project {
+        Self::open_inner(path, true)
+    }
+
+    fn open_inner(path: &Path, load_devices: bool) -> Project {
         let dir = if path.is_file() {
             path.parent().map(Path::to_path_buf).unwrap_or_default()
         } else {
@@ -51,15 +86,20 @@ impl Project {
                     config_ok: false,
                     schema: None,
                     diagnostics: vec![Diagnostic::error(&file, None, format!("cannot read: {e}"))],
+                    devices: Vec::new(),
                 }
             }
         };
-        Self::from_text(dir, text)
+        Self::from_text_inner(dir, text, load_devices)
     }
 
     /// Builds a project from config text (the folder is used to resolve
     /// relative paths).
     pub fn from_text(dir: PathBuf, text: String) -> Project {
+        Self::from_text_inner(dir, text, true)
+    }
+
+    fn from_text_inner(dir: PathBuf, text: String, load_devices: bool) -> Project {
         let file = dir.join(PROJECT_FILE);
         let loaded = load_config_str(&text, &file);
         let mut diagnostics = loaded.diagnostics;
@@ -84,6 +124,7 @@ impl Project {
             config_ok,
             schema,
             diagnostics,
+            devices: Vec::new(),
         };
         if let Some(schema) = p.schema.clone() {
             let found = check_against_schema(&p.config, &schema);
@@ -92,7 +133,119 @@ impl Project {
                 p.diagnostics.push(Diagnostic::error(&file, line, msg));
             }
         }
+        if load_devices && config_ok {
+            p.load_devices();
+        }
         p
+    }
+
+    /// Opens every `[[devices]]` project. Their diagnostics join this
+    /// project's; a device project may not list devices of its own (one
+    /// level), except when it is this very folder (two identical boards).
+    fn load_devices(&mut self) {
+        let file = self.config_path();
+        let me = std::fs::canonicalize(&self.dir).unwrap_or_else(|_| self.dir.clone());
+        let entries = self.config.devices.clone();
+        for (i, d) in entries.iter().enumerate() {
+            if d.project.trim().is_empty() || !crate::config::is_device_name(&d.name) {
+                continue; // reported by validation
+            }
+            let at = |p: &Project, k: &str| {
+                let path: [Seg; 3] = ["devices".into(), i.into(), k.into()];
+                locate_line(&p.config_text, &path)
+            };
+            let dir = normalize(&self.dir.join(&d.project));
+            if !dir.join(PROJECT_FILE).is_file() {
+                let line = at(self, "project");
+                self.diagnostics.push(Diagnostic::error(
+                    &file,
+                    line,
+                    format!(
+                        "device `{}`: no {PROJECT_FILE} in `{}`",
+                        d.name,
+                        dir.display()
+                    ),
+                ));
+                continue;
+            }
+            let canon = std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone());
+            let dp = Project::open_inner(&dir, false);
+            if canon != me && !dp.config.devices.is_empty() {
+                let line = at(self, "project");
+                self.diagnostics.push(Diagnostic::error(
+                    &file,
+                    line,
+                    format!(
+                        "device `{}`: `{}` lists [[devices]] of its own; devices nest one level only",
+                        d.name, d.project
+                    ),
+                ));
+            }
+            if let Some(prof) = &d.profile {
+                if dp.config_ok && dp.config.profile(prof).is_none() {
+                    let line = at(self, "profile");
+                    self.diagnostics.push(Diagnostic::error(
+                        &file,
+                        line,
+                        format!(
+                            "device `{}`: no connection profile `{prof}` in `{}`",
+                            d.name, d.project
+                        ),
+                    ));
+                }
+            }
+            if canon != me {
+                self.diagnostics.extend(dp.diagnostics.iter().cloned());
+            }
+            self.devices.push(DeviceProject {
+                name: d.name.clone(),
+                profile: d.profile.clone(),
+                project: dp,
+            });
+        }
+    }
+
+    /// `main` (this project) followed by the `[[devices]]` that loaded.
+    pub fn all_devices(&self) -> Vec<DeviceRef<'_>> {
+        let mut v = vec![DeviceRef {
+            name: MAIN_DEVICE,
+            project: self,
+            profile: None,
+        }];
+        v.extend(self.devices.iter().map(|d| DeviceRef {
+            name: &d.name,
+            project: &d.project,
+            profile: d.profile.as_deref(),
+        }));
+        v
+    }
+
+    /// A device by name (`main` is this project).
+    pub fn device(&self, name: &str) -> Option<DeviceRef<'_>> {
+        self.all_devices().into_iter().find(|d| d.name == name)
+    }
+
+    /// The profile a device connects with: `chosen` if given, else the
+    /// `[[devices]]` profile, else the device project's default.
+    pub fn device_profile(
+        &self,
+        device: &str,
+        chosen: Option<&str>,
+    ) -> crate::Result<ConnectionProfile> {
+        let d = self
+            .device(device)
+            .ok_or_else(|| crate::CoreError::Config(format!("no device `{device}`")))?;
+        let cfg = &d.project.config;
+        match chosen.or(d.profile) {
+            Some(name) => cfg.profile(name).cloned().ok_or_else(|| {
+                crate::CoreError::Config(format!(
+                    "device `{device}`: no connection profile `{name}`"
+                ))
+            }),
+            None => cfg.default_profile().cloned().ok_or_else(|| {
+                crate::CoreError::Config(format!("device `{device}` has no connection profiles"))
+            }),
+        }
     }
 
     /// Re-reads the project from disk.
@@ -196,6 +349,29 @@ impl Project {
         std::fs::write(&cfg, doc.to_string()).map_err(|e| crate::CoreError::io(&cfg, e))?;
         Ok(dest.to_path_buf())
     }
+}
+
+/// Removes `.` and `x/..` from a path without touching the file system,
+/// so paths in messages read `examples/demo-reference` rather than
+/// `examples/demo-sensor/../demo-reference`.
+fn normalize(p: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let pop = matches!(out.components().next_back(), Some(Component::Normal(_)));
+                if pop {
+                    out.pop();
+                } else {
+                    out.push("..");
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 /// Creates a new, minimal project in `dir`.
@@ -456,8 +632,144 @@ mod tests {
         assert_eq!(p.config.connection.profiles.len(), 3);
         assert_eq!(
             p.sequence_names(),
-            vec!["scripted".to_string(), "smoke".to_string()]
+            vec![
+                "compare".to_string(),
+                "scripted".to_string(),
+                "smoke".to_string()
+            ]
         );
+        // The reference meter is device `ref`, a project of its own.
+        let names: Vec<&str> = p.all_devices().iter().map(|d| d.name).collect();
+        assert_eq!(names, ["main", "ref"]);
+        let r = p.device("ref").unwrap();
+        assert_eq!(r.project.config.name, "Demo Reference");
+        assert!(r.project.schema.is_some());
+        assert_eq!(p.device_profile("ref", None).unwrap().name, "sim");
+        assert_eq!(p.device_profile("main", None).unwrap().name, "usb");
+        assert_eq!(p.device_profile("ref", Some("usb")).unwrap().name, "usb");
+        assert!(p.device_profile("ref", Some("nope")).is_err());
+        // Paths in messages are tidy.
+        assert!(
+            !r.project.dir.to_string_lossy().contains(".."),
+            "{:?}",
+            r.project.dir
+        );
+    }
+
+    #[test]
+    fn device_list_errors_name_the_line() {
+        let root = std::env::temp_dir().join(format!("pb-proj-devs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for n in ["a", "b", "c"] {
+            create_project(&root.join(n), n).unwrap();
+        }
+        let append = |n: &str, text: &str| {
+            let f = root.join(n).join(PROJECT_FILE);
+            let mut s = std::fs::read_to_string(&f).unwrap();
+            s.push_str(text);
+            std::fs::write(&f, s).unwrap();
+        };
+        // c lists a device of its own, so it cannot be one.
+        append("c", "\n[[devices]]\nname = \"x\"\nproject = \"../b\"\n");
+        append(
+            "a",
+            r#"
+[[devices]]
+name = "b"
+project = "../b"
+profile = "usb"
+
+[[devices]]
+name = "b"
+project = "../b"
+
+[[devices]]
+name = "gone"
+project = "../nope"
+
+[[devices]]
+name = "c"
+project = "../c"
+
+[[devices]]
+name = "main"
+project = "../b"
+
+[[devices]]
+name = "9x"
+project = "../b"
+
+[[devices]]
+name = "d"
+project = "../b"
+profile = "wifi"
+
+[[devices]]
+name = "twin"
+project = "."
+"#,
+        );
+        let p = Project::open(&root.join("a"));
+        let text = std::fs::read_to_string(p.config_path()).unwrap();
+        let line_of = |needle: &str| text.lines().position(|l| l == needle).unwrap() + 1;
+        let errs: Vec<(Option<usize>, String)> =
+            p.errors().map(|d| (d.line, d.message.clone())).collect();
+        let has = |line: usize, msg: &str| {
+            errs.iter()
+                .any(|(l, m)| *l == Some(line) && m.contains(msg))
+        };
+        // The second `name = "b"` line.
+        let dup = text
+            .lines()
+            .enumerate()
+            .filter(|(_, l)| *l == "name = \"b\"")
+            .nth(1)
+            .unwrap()
+            .0
+            + 1;
+        assert!(has(dup, "duplicate device name `b`"), "{errs:#?}");
+        assert!(
+            has(
+                line_of("project = \"../nope\""),
+                "device `gone`: no project.toml"
+            ),
+            "{errs:#?}"
+        );
+        assert!(
+            has(line_of("project = \"../c\""), "devices nest one level only"),
+            "{errs:#?}"
+        );
+        assert!(
+            has(
+                line_of("name = \"main\""),
+                "`main` is this project's own device"
+            ),
+            "{errs:#?}"
+        );
+        assert!(
+            has(line_of("name = \"9x\""), "must start with a letter"),
+            "{errs:#?}"
+        );
+        assert!(
+            has(
+                line_of("profile = \"wifi\""),
+                "no connection profile `wifi`"
+            ),
+            "{errs:#?}"
+        );
+        // Eight entries plus `main` is one too many.
+        assert!(
+            errs.iter()
+                .any(|(_, m)| m
+                    .contains("at most 8 devices including this project's own; 9 are listed")),
+            "{errs:#?}"
+        );
+        assert_eq!(errs.len(), 7, "{errs:#?}");
+        // A device may be the project's own folder (two identical boards).
+        let twin = p.device("twin").unwrap();
+        assert_eq!(twin.project.config.name, "a");
+        assert!(twin.project.devices.is_empty());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

@@ -52,13 +52,17 @@ enum Command {
         /// Project folder.
         #[arg(long)]
         project: PathBuf,
-        /// Connection profile (default: the project's default).
+        /// Device to send to (`main` = the project's own; or a `[[devices]]` name).
+        /// Only this device connects.
+        #[arg(long, default_value = "main")]
+        device: String,
+        /// Connection profile of that device (default: its default profile).
         #[arg(long)]
-        profile: Option<String>,
+        profile: Vec<String>,
         /// Override the serial port, or host:port for network profiles.
         #[arg(long)]
-        port: Option<String>,
-        /// Command name from project.toml.
+        port: Vec<String>,
+        /// Command name from the device's project.toml.
         #[arg(long)]
         command: String,
         /// Override a payload field: `--set millivolts=300`.
@@ -68,24 +72,30 @@ enum Command {
         #[arg(long)]
         wait: bool,
     },
-    /// Print decoded messages and channels as they arrive.
+    /// Print decoded messages and channels as they arrive (every device).
     Monitor {
         /// Project folder.
         #[arg(long)]
         project: PathBuf,
-        /// Connection profile.
-        #[arg(long)]
-        profile: Option<String>,
-        /// Override the serial port or host:port.
-        #[arg(long)]
-        port: Option<String>,
+        /// Connection profile: `NAME` for the project's own device,
+        /// `DEVICE=NAME` for another (repeatable).
+        #[arg(long, value_name = "[DEVICE=]PROFILE")]
+        profile: Vec<String>,
+        /// Override the serial port or host:port: `PORT`, or `DEVICE=PORT`
+        /// (repeatable).
+        #[arg(long, value_name = "[DEVICE=]PORT")]
+        port: Vec<String>,
+        /// Start only these devices (comma-separated, e.g. `main`).
+        #[arg(long, value_delimiter = ',')]
+        only: Vec<String>,
         /// Print one JSON object per line.
         #[arg(long)]
         json: bool,
         /// Print these channels instead of messages (comma-separated).
         #[arg(long, value_delimiter = ',')]
         channels: Vec<String>,
-        /// Commands to send after connecting (e.g. `--send "Start Stream"`).
+        /// Commands to send after connecting (e.g. `--send "Start Stream"`,
+        /// `--send "ref:Start Stream"` for device `ref`).
         #[arg(long = "send")]
         send: Vec<String>,
         /// Stop after this many seconds.
@@ -109,12 +119,17 @@ enum Command {
         /// Sequence name (file stem in sequences/) or path.
         #[arg(long)]
         sequence: String,
-        /// Connection profile.
-        #[arg(long)]
-        profile: Option<String>,
-        /// Override the serial port or host:port.
-        #[arg(long)]
-        port: Option<String>,
+        /// Connection profile: `NAME` for the project's own device,
+        /// `DEVICE=NAME` for another (repeatable).
+        #[arg(long, value_name = "[DEVICE=]PROFILE")]
+        profile: Vec<String>,
+        /// Override the serial port or host:port: `PORT`, or `DEVICE=PORT`
+        /// (repeatable).
+        #[arg(long, value_name = "[DEVICE=]PORT")]
+        port: Vec<String>,
+        /// Start only these devices (comma-separated, e.g. `main`).
+        #[arg(long, value_delimiter = ',')]
+        only: Vec<String>,
         /// Report folder (default: <project>/reports).
         #[arg(long)]
         report_dir: Option<PathBuf>,
@@ -191,16 +206,29 @@ fn main() -> ExitCode {
         Command::Schema { project, message } => cmd::schema(&project, message.as_deref()),
         Command::Send {
             project,
+            device,
             profile,
             port,
             command,
             set,
             wait,
-        } => cmd::send(&project, profile.as_deref(), port, &command, &set, wait),
+        } => cmd::send(
+            &project,
+            &device,
+            &cmd::DeviceArgs {
+                profiles: profile,
+                ports: port,
+                only: Vec::new(),
+            },
+            &command,
+            &set,
+            wait,
+        ),
         Command::Monitor {
             project,
             profile,
             port,
+            only,
             json,
             channels,
             send,
@@ -210,8 +238,11 @@ fn main() -> ExitCode {
             foxglove_bind,
         } => cmd::monitor(cmd::MonitorArgs {
             project,
-            profile,
-            port,
+            devices: cmd::DeviceArgs {
+                profiles: profile,
+                ports: port,
+                only,
+            },
             json,
             channels,
             send,
@@ -225,14 +256,18 @@ fn main() -> ExitCode {
             sequence,
             profile,
             port,
+            only,
             report_dir,
             non_interactive,
             vars,
         } => cmd::run(
             &project,
             &sequence,
-            profile.as_deref(),
-            port,
+            &cmd::DeviceArgs {
+                profiles: profile,
+                ports: port,
+                only,
+            },
             report_dir,
             non_interactive,
             &vars,

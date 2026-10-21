@@ -42,7 +42,15 @@ pub struct ProjectConfig {
     pub derived: Vec<DerivedConfig>,
     /// Built-in device simulator.
     pub simulator: SimulatorConfig,
+    /// Other devices connected alongside this one, each its own project.
+    pub devices: Vec<DeviceConfig>,
 }
+
+/// Name of the project's own device.
+pub const MAIN_DEVICE: &str = "main";
+
+/// Most devices a project can connect at once, its own included.
+pub const MAX_DEVICES: usize = 8;
 
 impl Default for ProjectConfig {
     fn default() -> Self {
@@ -61,6 +69,7 @@ impl Default for ProjectConfig {
             telemetry: Vec::new(),
             derived: Vec::new(),
             simulator: SimulatorConfig::default(),
+            devices: Vec::new(),
         }
     }
 }
@@ -87,6 +96,39 @@ impl ProjectConfig {
     /// Looks up field metadata by path.
     pub fn field_meta(&self, path: &str) -> Option<&FieldMeta> {
         self.fields.iter().find(|f| f.path == path)
+    }
+}
+
+/// `[[devices]]`: another device connected alongside the project's own
+/// (`main`). It is a project folder of its own, with its own schema,
+/// framing, commands, telemetry and simulator.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct DeviceConfig {
+    /// Identifier (letters, digits, `_`): prefixes the device's channels
+    /// (`ref.reading.vout_mv`) and names it in sequences and the CLI.
+    pub name: String,
+    /// The device's project folder, relative to this project.
+    pub project: String,
+    /// Connection profile of that project; its default profile if omitted.
+    pub profile: Option<String>,
+}
+
+/// True for a valid device name: a letter or `_`, then letters, digits, `_`.
+pub fn is_device_name(s: &str) -> bool {
+    let mut c = s.chars();
+    c.next()
+        .is_some_and(|f| f.is_ascii_alphabetic() || f == '_')
+        && c.all(|x| x.is_ascii_alphanumeric() || x == '_')
+}
+
+/// `ref.` for device `ref`; empty for `main`, whose channels keep their
+/// plain names.
+pub fn channel_prefix(device: &str) -> String {
+    if device == MAIN_DEVICE {
+        String::new()
+    } else {
+        format!("{device}.")
     }
 }
 

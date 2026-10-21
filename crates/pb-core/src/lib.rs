@@ -5,6 +5,7 @@
 //! commands, recording and test sequences. The GUI and CLI are thin layers on
 //! top of this crate, and nothing in here depends on a UI toolkit.
 
+pub mod bench;
 pub mod check;
 pub mod clock;
 pub mod codec;

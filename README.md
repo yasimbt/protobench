@@ -10,6 +10,7 @@ ProtoBench is a desktop and command-line tool for developing and testing embedde
 - Session recordings that decode on their own; CSV, Parquet and MCAP export (pandas/polars, Foxglove, PlotJuggler).
 - A live Foxglove WebSocket server, so Foxglove's panels show the device while you work.
 - Test sequences in TOML with JSON and JUnit reports, sandboxed Rhai scripts for sweeps and custom logic, and `protobench check` to catch broken projects in CI.
+- Several different devices at once (`[[devices]]`): the board under test next to a reference meter, each with its own `.proto` and settings, on one time axis, in one recording, and driven by one sequence.
 
 <!-- Screenshot: docs/images/dashboard.png (main window with the demo project connected to the simulator) -->
 
@@ -29,7 +30,7 @@ On Linux the GUI loads OpenGL, Wayland/X11 and xkbcommon at runtime; distributio
 
 ## Quick start with the simulator
 
-The demo project in `examples/demo-sensor/` describes an amperometric sensor board and includes a simulator, so it works without hardware.
+The demo project in `examples/demo-sensor/` describes an amperometric sensor board and includes a simulator, so it works without hardware. It lists a second device, the reference meter in `examples/demo-reference/` (device `ref`, with its own protocol and simulator), which connects alongside it.
 
 GUI:
 
@@ -53,6 +54,10 @@ target/release/protobench decode demo.pbsession --csv demo.csv
 # Check the project (exit 1 on errors), run the scripted bias sweep
 target/release/protobench check --project examples/demo-sensor
 target/release/protobench run --project examples/demo-sensor --sequence scripted --profile sim
+
+# Compare the sensor with the reference meter (device `ref`) in one sequence
+target/release/protobench run --project examples/demo-sensor --sequence compare \
+    --profile sim --profile ref=sim
 
 # Export part of a recording to Parquet
 target/release/protobench decode demo.pbsession --parquet demo.parquet \

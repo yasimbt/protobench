@@ -85,30 +85,39 @@ fn run_var_sets_operator_inputs() {
     let _ = std::fs::remove_dir_all(reports);
 }
 
-/// Copies the demo project (one folder level deep) into `dir`.
-fn copy_demo(dir: &Path) {
-    for e in std::fs::read_dir(demo()).unwrap().flatten() {
+/// Copies a folder tree, skipping recordings and reports.
+fn copy_tree(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(from).unwrap().flatten() {
         let p = e.path();
         let name = e.file_name();
         if name == "recordings" || name == "reports" {
             continue;
         }
         if p.is_dir() {
-            let to = dir.join(&name);
-            std::fs::create_dir_all(&to).unwrap();
-            for f in std::fs::read_dir(&p).unwrap().flatten() {
-                std::fs::copy(f.path(), to.join(f.file_name())).unwrap();
-            }
+            copy_tree(&p, &to.join(&name));
         } else {
-            std::fs::copy(&p, dir.join(&name)).unwrap();
+            std::fs::copy(&p, to.join(&name)).unwrap();
         }
     }
 }
 
+/// Copies the demo project and the reference meter it lists as device
+/// `ref` (as siblings) into `dir`; returns the demo project's folder.
+fn copy_demo(dir: &Path) -> PathBuf {
+    let examples = demo().parent().unwrap().to_path_buf();
+    copy_tree(&demo(), &dir.join("demo-sensor"));
+    copy_tree(
+        &examples.join("demo-reference"),
+        &dir.join("demo-reference"),
+    );
+    dir.join("demo-sensor")
+}
+
 #[test]
 fn failing_sequence_exits_1_and_bad_project_exits_2() {
-    let dir = tmp("proj");
-    copy_demo(&dir);
+    let root = tmp("proj");
+    let dir = copy_demo(&root);
     std::fs::write(
         dir.join("sequences/bad.toml"),
         "[[steps]]\naction = \"send\"\ncommand = \"Set Bias\"\nexpect = \"ack\"\nassert = [ { path = \"ack.ok\", eq = false } ]\n",
@@ -171,7 +180,7 @@ fn failing_sequence_exits_1_and_bad_project_exits_2() {
     assert_eq!(out.status.code(), Some(2));
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("device.proto:2"), "{err}");
-    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -276,8 +285,8 @@ fn check_demo_passes_and_broken_sequence_fails_with_location() {
     );
     assert!(String::from_utf8_lossy(&out.stderr).contains("0 errors"));
 
-    let dir = tmp("check");
-    copy_demo(&dir);
+    let root = tmp("check");
+    let dir = copy_demo(&root);
     std::fs::write(
         dir.join("sequences/broken.toml"),
         "name = \"broken\"\n\n[[steps]]\naction = \"send\"\ncommand = \"Pnig\"\n",
@@ -303,7 +312,7 @@ fn check_demo_passes_and_broken_sequence_fails_with_location() {
     let j: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(j["errors"], 1);
     assert_eq!(j["findings"][0]["line"], 3);
-    let _ = std::fs::remove_dir_all(dir);
+    let _ = std::fs::remove_dir_all(root);
 }
 
 #[test]
@@ -566,5 +575,172 @@ fn parquet_export_matches_csv() {
     assert_eq!(names, header);
     assert!(csv_rows.len() > 100);
     assert_eq!(pq_rows, csv_rows);
+    let _ = std::fs::remove_dir_all(d);
+}
+
+#[test]
+fn compare_runs_on_two_devices_and_fails_fast_without_one() {
+    let reports = tmp("compare");
+    let run = |extra: &[&str]| {
+        bin()
+            .args(["run", "--project"])
+            .arg(demo())
+            .args(["--sequence", "compare"])
+            .args(extra)
+            .arg("--report-dir")
+            .arg(&reports)
+            .output()
+            .unwrap()
+    };
+    let out = run(&["--profile", "sim", "--profile", "ref=sim"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{err}");
+    assert!(err.contains("PASS 2 send ref:Ping"), "{err}");
+    assert!(err.contains("err_mv mean in [-5, 5]"), "{err}");
+    // Without the meter the run stops at the start: a connection error.
+    let out = run(&["--profile", "sim", "--only", "main"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(2), "{err}");
+    assert!(err.contains("device `ref` is not connected"), "{err}");
+    // Unknown devices in options are configuration errors.
+    let out = run(&["--profile", "meter2=sim"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no device `meter2`"));
+    let out = run(&["--only", "meter2"]);
+    assert_eq!(out.status.code(), Some(2));
+    let _ = std::fs::remove_dir_all(reports);
+}
+
+#[test]
+fn send_reaches_one_device_only() {
+    let out = bin()
+        .args(["send", "--project"])
+        .arg(demo())
+        .args([
+            "--device",
+            "ref",
+            "--profile",
+            "sim",
+            "--command",
+            "Ping",
+            "--wait",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("SIM-REF-1"));
+    let out = bin()
+        .args(["send", "--project"])
+        .arg(demo())
+        .args([
+            "--device",
+            "ref",
+            "--profile",
+            "sim",
+            "--command",
+            "Set Bias",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no command `Set Bias` on device `ref`"));
+}
+
+#[test]
+fn two_device_recording_decodes_with_device_tags() {
+    let d = tmp("bench-rec");
+    let rec = d.join("bench.pbsession");
+    let out = bin()
+        .args(["monitor", "--project"])
+        .arg(demo())
+        .args([
+            "--profile",
+            "sim",
+            "--send",
+            "Start Stream",
+            "--send",
+            "ref:Ping",
+            "--duration",
+            "0.4",
+            "--json",
+            "--record",
+        ])
+        .arg(&rec)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let live = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        live.lines().any(|l| l.contains("\"device\":\"ref\"")),
+        "live JSON tags ref"
+    );
+    let out = bin().arg("decode").arg(&rec).output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("ref:reading"),
+        "{}",
+        &text[..text.len().min(2000)]
+    );
+    assert!(text.contains("ref:pong"));
+    let csv = d.join("bench.csv");
+    let out = bin()
+        .arg("decode")
+        .arg(&rec)
+        .args([
+            "--channels",
+            "telemetry.vout_raw,ref.reading.vout_mv,err_mv",
+            "--csv",
+        ])
+        .arg(&csv)
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let head = std::fs::read_to_string(&csv).unwrap();
+    assert_eq!(
+        head.lines().next().unwrap(),
+        "time_s,telemetry.vout_raw,ref.reading.vout_mv,err_mv"
+    );
+    let _ = std::fs::remove_dir_all(d);
+}
+
+#[test]
+fn round3_recording_decodes() {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../pb-core/tests/fixtures/round3-demo.pbsession");
+    let out = bin().arg("decode").arg(&fixture).output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.starts_with("# Demo Sensor — recorded with ProtoBench 0.1.0 — 306 records"));
+    assert!(!text.contains("<"), "no undecoded records");
+    let d = tmp("r3");
+    let out = bin()
+        .arg("decode")
+        .arg(&fixture)
+        .arg("--parquet")
+        .arg(d.join("r3.parquet"))
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let _ = std::fs::remove_dir_all(d);
 }

@@ -234,6 +234,27 @@ Requests without a matching response get no reply.
 
 Arguments are named (`amp=1500`) or positional in the order above. Values are rounded and clamped to the field type. A string that is not a generator is used literally for string, enum and bytes fields; for other types it is an error.
 
+### `[[devices]]` — other devices on the bench
+
+Each entry adds a device that connects alongside the project's own (which is called `main`). A device is a project folder of its own, with its own schema, framing, codec, commands, telemetry and simulator, so every firmware repository keeps its own `project.toml`.
+
+```toml
+[[devices]]
+name = "ref"                     # identifier: letters, digits, _
+project = "../demo-reference"    # path relative to this project
+profile = "sim"                  # optional; that project's default otherwise
+```
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `name` | string | required | Device name: a letter or `_`, then letters, digits and `_`. Not `main`, and unique. |
+| `project` | string | required | The device's project folder, relative to this project. It may be this project's own folder (`"."`) for two identical boards. |
+| `profile` | string | that project's default | Connection profile of the device's project. `--profile ref=usb` overrides it. |
+
+At most 8 devices, `main` included. Devices nest one level: a device project that lists `[[devices]]` of its own is an error (unless it is this project's own folder, whose list is then ignored). Errors in a device project are reported with this project's and stop it from connecting.
+
+Other devices' channels are named `<device>.<channel>`, such as `ref.reading.vout_mv`, everywhere: plots, layouts, sequences, derived expressions, CSV and Parquet columns. `main`'s channels keep their plain names. A derived channel of this project may use any device's channels: it is computed when a `main` message arrives, with the newest value of the other device's channel. A device project's own derived channels use its own channel names.
+
 ## Sequence files (`sequences/<name>.toml`)
 
 Sequence files are strict: unknown keys are errors (with line numbers), so typos are caught before a test runs.
@@ -257,6 +278,7 @@ Sequence files are strict: unknown keys are errors (with line numbers), so typos
 
 | Key | Meaning |
 |---|---|
+| `device` | Device to send to (default `main`). Commands and messages are looked up in that device's project. |
 | `command` | Command name from `project.toml` (`${var}` allowed), or |
 | `message` | an inline message name, with |
 | `payload` | an inline payload, or for `command`: overrides of the command's payload fields. |
@@ -269,9 +291,11 @@ The step fails on a timeout, on a reply of the wrong type, or on a failed assert
 
 **`wait`** — `ms`: pause.
 
-**`expect`** — wait for a received message. `message` (required), `timeout_ms` (default 1000), `assert`. It matches the oldest message of that type received since the *previous* step started that no earlier step has used.
+**`expect`** — wait for a received message. `message` (required), `timeout_ms` (default 1000), `assert`, and `device` (default `main`) for a message from another device. It matches the oldest message of that type from that device received since the *previous* step started that no earlier step has used.
 
-**`capture`** — collect samples, then check statistics. `channels` (required), and `duration_ms` or `samples` (new samples on the first channel; `timeout_ms`, default 10000, bounds the wait). `assert` entries use `channel` and `stat`. Every channel listed or named in an assertion is measured over the capture window only. `rate_hz` is the sample count divided by the capture duration.
+**`capture`** — collect samples, then check statistics. `channels` (required), and `duration_ms` or `samples` (new samples on the first channel; `timeout_ms`, default 10000, bounds the wait). `assert` entries use `channel` and `stat`. Every channel listed or named in an assertion is measured over the capture window only. `rate_hz` is the sample count divided by the capture duration. Channels of other devices have their full names (`ref.reading.vout_mv`); with `device = "ref"`, the names in `channels` and the assertions are that device's own (`reading.vout_mv`).
+
+`wait`, `set`, `loop`, `log`, `prompt_operator` and `script` take no `device` (a script reaches devices through its API). Before the first step runs, every device a step names must be configured and connected; otherwise the run stops with a single `devices` error (exit code 2 in the CLI) naming the device.
 
 **`set`** — `var` + `value`, or a `vars` table.
 

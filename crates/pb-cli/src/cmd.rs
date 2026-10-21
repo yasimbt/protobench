@@ -10,13 +10,12 @@ use std::time::{Duration, Instant};
 use anyhow::{anyhow, bail, Context, Result};
 use prost_reflect::{Kind, MessageDescriptor};
 
-use pb_core::clock::SystemClock;
+use pb_core::bench::Bench;
 use pb_core::commands::{build_command, parse_value};
+use pb_core::config::MAIN_DEVICE;
 use pb_core::project::Project;
 use pb_core::schema::Schema;
-use pb_core::session::{
-    ConnState, Direction, RequestOutcome, Session, SessionEvent, SessionParams,
-};
+use pb_core::session::{ConnState, Direction, RequestOutcome, SessionEvent};
 
 use crate::NonInteractive;
 
@@ -32,45 +31,111 @@ fn open_project(dir: &Path) -> Result<Project> {
     Ok(p)
 }
 
-/// Connects to a project's device with the chosen profile.
-pub fn connect(p: &Project, profile: Option<&str>, port: Option<String>) -> Result<Session> {
-    let prof = match profile {
-        Some(name) => p
-            .config
-            .profile(name)
-            .ok_or_else(|| anyhow!("no connection profile `{name}`"))?,
-        None => p
-            .config
-            .default_profile()
-            .ok_or_else(|| anyhow!("project has no connection profiles"))?,
-    }
-    .clone();
-    let sim = if prof.transport == pb_core::config::TransportKind::Sim {
-        Some(pb_sim::sim_factory(p)?)
-    } else {
-        None
-    };
-    let connector = pb_core::transport::connector(&prof, &p.dir, &p.config.framing, sim, port)?;
-    let mut params = SessionParams::new(p, &prof)?;
-    // The CLI fails fast instead of retrying forever on the first connect.
-    let auto = params.auto_reconnect;
-    params.auto_reconnect = false;
-    let session = Session::start(params.clone(), connector, SystemClock::shared())?;
-    let mut state = session.wait_connected(Duration::from_secs(5));
-    if state == ConnState::Listening {
-        // A server profile waits for its client as long as it takes.
-        eprintln!("waiting for a client on {} …", session.endpoint());
-        while state == ConnState::Listening {
-            state = session.wait_connected(Duration::from_secs(60));
+/// Device options shared by `send`, `monitor` and `run`.
+#[derive(Debug, Clone, Default)]
+pub struct DeviceArgs {
+    /// `--profile`: `NAME` for `main` (or the target of `send`), `DEVICE=NAME`.
+    pub profiles: Vec<String>,
+    /// `--port`: `PORT` for `main` (or the target of `send`), `DEVICE=PORT`.
+    pub ports: Vec<String>,
+    /// `--only`: devices to start (default: all).
+    pub only: Vec<String>,
+}
+
+/// Splits `--profile`/`--port` values into per-device values. `DEVICE=VALUE`
+/// names a device; a bare value is for `bare` (`main`, or the target of
+/// `send`).
+fn per_device(
+    flag: &str,
+    values: &[String],
+    p: &Project,
+    bare: &str,
+) -> Result<std::collections::HashMap<String, String>> {
+    let mut out = std::collections::HashMap::new();
+    for v in values {
+        let (dev, val) = match v.split_once('=') {
+            Some((d, x)) if pb_core::config::is_device_name(d.trim()) => {
+                let d = d.trim();
+                if p.device(d).is_none() {
+                    bail!(
+                        "{flag} {v}: no device `{d}` (this project has {})",
+                        device_list(p)
+                    );
+                }
+                (d.to_string(), x.trim().to_string())
+            }
+            _ => (bare.to_string(), v.trim().to_string()),
+        };
+        if out.insert(dev.clone(), val).is_some() {
+            bail!("{flag} given twice for device `{dev}`");
         }
     }
-    match state {
-        ConnState::Connected => {}
-        ConnState::Failed(e) => bail!("cannot connect ({}): {e}", prof.endpoint()),
-        other => bail!("cannot connect ({}): {}", prof.endpoint(), other.label()),
+    Ok(out)
+}
+
+fn device_list(p: &Project) -> String {
+    p.all_devices()
+        .iter()
+        .map(|d| format!("`{}`", d.name))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Starts devices of a project and waits until each is connected. With
+/// `only` empty every device starts. `bare` is the device that bare
+/// `--profile`/`--port` values belong to.
+pub fn connect_devices(p: &Project, a: &DeviceArgs, only: &[&str], bare: &str) -> Result<Bench> {
+    let profiles = per_device("--profile", &a.profiles, p, bare)?;
+    let ports = per_device("--port", &a.ports, p, bare)?;
+    for o in only {
+        if p.device(o).is_none() {
+            bail!(
+                "--only {o}: no device `{o}` (this project has {})",
+                device_list(p)
+            );
+        }
     }
-    let _ = auto;
-    Ok(session)
+    let mut bench = Bench::default();
+    let mut started = Vec::new();
+    for d in p.all_devices() {
+        if !only.is_empty() && !only.contains(&d.name) {
+            continue;
+        }
+        let what = if d.name == pb_core::config::MAIN_DEVICE {
+            String::new()
+        } else {
+            format!("device `{}`: ", d.name)
+        };
+        let dev = bench
+            .start(
+                p,
+                d.name,
+                profiles.get(d.name).map(String::as_str),
+                ports.get(d.name).cloned(),
+                &|dp: &Project| pb_sim::sim_factory(dp),
+                // The CLI fails fast instead of retrying forever.
+                |params| params.auto_reconnect = false,
+            )
+            .map_err(|e| anyhow!("{what}{e}"))?;
+        started.push((d.name.to_string(), what, dev.profile.endpoint()));
+    }
+    for (name, what, endpoint) in started {
+        let session = bench.session(&name).expect("started").clone();
+        let mut state = session.wait_connected(Duration::from_secs(5));
+        if state == ConnState::Listening {
+            // A server profile waits for its client as long as it takes.
+            eprintln!("{what}waiting for a client on {} …", session.endpoint());
+            while state == ConnState::Listening {
+                state = session.wait_connected(Duration::from_secs(60));
+            }
+        }
+        match state {
+            ConnState::Connected => {}
+            ConnState::Failed(e) => bail!("{what}cannot connect ({endpoint}): {e}"),
+            other => bail!("{what}cannot connect ({endpoint}): {}", other.label()),
+        }
+    }
+    Ok(bench)
 }
 
 pub fn list_ports(json: bool) -> Result<ExitCode> {
@@ -214,22 +279,38 @@ pub fn parse_sets(flag: &str, sets: &[String]) -> Result<Vec<(String, serde_json
 
 pub fn send(
     dir: &Path,
-    profile: Option<&str>,
-    port: Option<String>,
+    device: &str,
+    devices: &DeviceArgs,
     command: &str,
     set: &[String],
     wait: bool,
 ) -> Result<ExitCode> {
     let p = open_project(dir)?;
-    let cmd = p
+    let d = p.device(device).ok_or_else(|| {
+        anyhow!(
+            "--device {device}: no device `{device}` (this project has {})",
+            device_list(&p)
+        )
+    })?;
+    let cmd = d
+        .project
         .config
         .command(command)
-        .ok_or_else(|| anyhow!("no command `{command}` in project.toml"))?
+        .ok_or_else(|| {
+            if device == MAIN_DEVICE {
+                anyhow!("no command `{command}` in project.toml")
+            } else {
+                anyhow!("no command `{command}` on device `{device}`")
+            }
+        })?
         .clone();
+    let config = d.project.config.clone();
     let overrides = parse_sets("--set", set)?;
-    let session = connect(&p, profile, port)?;
+    // Only the target device connects; bare --profile/--port are its own.
+    let bench = connect_devices(&p, devices, &[device], device)?;
+    let session = bench.session(device).expect("connected");
     let mut req = build_command(
-        &p.config,
+        &config,
         session.codec(),
         &cmd,
         &overrides,
@@ -270,8 +351,7 @@ pub fn send(
 /// Arguments of `monitor`.
 pub struct MonitorArgs {
     pub project: PathBuf,
-    pub profile: Option<String>,
-    pub port: Option<String>,
+    pub devices: DeviceArgs,
     pub json: bool,
     pub channels: Vec<String>,
     pub send: Vec<String>,
@@ -281,22 +361,54 @@ pub struct MonitorArgs {
     pub foxglove_bind: String,
 }
 
+/// `ref:` for a device other than `main`.
+fn tag(device: &str) -> String {
+    if device == MAIN_DEVICE {
+        String::new()
+    } else {
+        format!("{device}:")
+    }
+}
+
 pub fn monitor(a: MonitorArgs) -> Result<ExitCode> {
     let p = open_project(&a.project)?;
-    let session = connect(&p, a.profile.as_deref(), a.port.clone())?;
-    let events = session.subscribe();
+    let only: Vec<&str> = a.devices.only.iter().map(String::as_str).collect();
+    let mut bench = connect_devices(&p, &a.devices, &only, MAIN_DEVICE)?;
+    // One stream of (device, event) from every device.
+    let (ev_tx, events) = crossbeam_channel::unbounded();
+    for d in bench.devices() {
+        let rx = d.session.subscribe();
+        let tx = ev_tx.clone();
+        let name = d.name.clone();
+        std::thread::spawn(move || {
+            while let Ok(ev) = rx.recv() {
+                if tx.send((name.clone(), ev)).is_err() {
+                    return;
+                }
+            }
+        });
+    }
+    drop(ev_tx);
     // Keep the server alive for the whole monitor run.
     let _foxglove = match a.foxglove {
         Some(port) => {
-            let fds = p.require_schema()?.fds_bytes().to_vec();
-            let server = pb_core::foxglove::FoxgloveServer::start(
+            let mut devs = Vec::new();
+            for d in bench.devices() {
+                devs.push(pb_core::foxglove::FoxgloveDevice {
+                    name: d.name.clone(),
+                    fds: d.project.require_schema()?.fds_bytes().to_vec(),
+                    topics: pb_core::topics::known_topics_on(&d.name, d.session.codec()),
+                });
+            }
+            let server = pb_core::foxglove::FoxgloveServer::start_devices(
                 &a.foxglove_bind,
                 port,
                 &format!("ProtoBench: {}", p.config.name),
-                &fds,
-                &pb_core::topics::known_topics(session.codec()),
+                &devs,
             )?;
-            server.attach(session.subscribe(), session.wall_offset_ns());
+            for d in bench.devices() {
+                server.attach_device(d.session.subscribe(), d.session.wall_offset_ns(), &d.name);
+            }
             eprintln!(
                 "foxglove server on ws://{} (open it in Foxglove: Open connection ▸ Foxglove WebSocket)",
                 server.local_addr()
@@ -306,18 +418,32 @@ pub fn monitor(a: MonitorArgs) -> Result<ExitCode> {
         None => None,
     };
     if let Some(path) = &a.record {
-        let w = pb_core::recorder::SessionWriter::create(path, &p)?;
-        session.start_recording(Box::new(w));
+        bench.start_recording(path, &p)?;
         eprintln!("recording to {}", path.display());
     }
-    for name in &a.send {
-        let cmd = p
+    for item in &a.send {
+        // `ref:Start Stream` sends to device `ref`.
+        let (dev, name) = match item.split_once(':') {
+            Some((d, n)) if bench.get(d).is_some() => (d, n),
+            _ => (MAIN_DEVICE, item.as_str()),
+        };
+        let d = bench
+            .get(dev)
+            .ok_or_else(|| anyhow!("--send {item}: device `{dev}` is not connected"))?;
+        let cmd = d
+            .project
             .config
             .command(name)
-            .ok_or_else(|| anyhow!("no command `{name}`"))?;
-        let req = build_command(&p.config, session.codec(), cmd, &[], &Default::default())?;
-        let out = session.send_and_wait(req);
-        eprintln!("{name}: {}", out.label());
+            .ok_or_else(|| anyhow!("--send {item}: no command `{name}`"))?;
+        let req = build_command(
+            &d.project.config,
+            d.session.codec(),
+            cmd,
+            &[],
+            &Default::default(),
+        )?;
+        let out = d.session.send_and_wait(req);
+        eprintln!("{item}: {}", out.label());
     }
     let deadline = a
         .duration
@@ -329,13 +455,19 @@ pub fn monitor(a: MonitorArgs) -> Result<ExitCode> {
         if deadline.is_some_and(|d| Instant::now() >= d) {
             break;
         }
-        let ev = match events.recv_timeout(Duration::from_millis(50)) {
+        let (dev, ev) = match events.recv_timeout(Duration::from_millis(50)) {
             Ok(e) => e,
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                 if !a.channels.is_empty() {
-                    print_channels(&session, &a.channels, a.json, &mut last, &mut out)?;
+                    print_channels(&bench, &a.channels, a.json, &mut last, &mut out)?;
                 }
-                if matches!(session.state(), ConnState::Failed(_) | ConnState::Finished) {
+                let over = bench.devices().iter().all(|d| {
+                    matches!(
+                        d.session.state(),
+                        ConnState::Failed(_) | ConnState::Finished
+                    )
+                });
+                if over {
                     break;
                 }
                 continue;
@@ -345,6 +477,7 @@ pub fn monitor(a: MonitorArgs) -> Result<ExitCode> {
         if !a.channels.is_empty() {
             continue;
         }
+        let tg = tag(&dev);
         match ev {
             SessionEvent::Message { dir, msg } => {
                 let t = msg.host_ts_ns as f64 / 1e9;
@@ -353,44 +486,46 @@ pub fn monitor(a: MonitorArgs) -> Result<ExitCode> {
                     Direction::Tx => "tx",
                 };
                 if a.json {
-                    let line = serde_json::json!({"t": t, "dir": d, "type": msg.type_name, "kind": msg.kind(), "msg": msg.to_json()});
+                    let mut line = serde_json::json!({"t": t, "dir": d, "type": msg.type_name, "kind": msg.kind(), "msg": msg.to_json()});
+                    if dev != MAIN_DEVICE {
+                        line["device"] = serde_json::Value::String(dev.clone());
+                    }
                     writeln!(out, "{line}")?;
                 } else {
-                    writeln!(out, "{t:10.4} {d} {:<12} {}", msg.kind(), msg.to_json())?;
+                    let kind = format!("{tg}{}", msg.kind());
+                    writeln!(out, "{t:10.4} {d} {kind:<12} {}", msg.to_json())?;
                 }
             }
             SessionEvent::Text { host_ts_ns, line } => {
                 if a.json {
-                    writeln!(
-                        out,
-                        "{}",
-                        serde_json::json!({"t": host_ts_ns as f64 / 1e9, "text": line})
-                    )?;
+                    let mut j = serde_json::json!({"t": host_ts_ns as f64 / 1e9, "text": line});
+                    if dev != MAIN_DEVICE {
+                        j["device"] = serde_json::Value::String(dev.clone());
+                    }
+                    writeln!(out, "{j}")?;
                 } else {
-                    writeln!(out, "{:10.4} log {line}", host_ts_ns as f64 / 1e9)?;
+                    writeln!(out, "{:10.4} log {tg}{line}", host_ts_ns as f64 / 1e9)?;
                 }
             }
             SessionEvent::BadFrame(b) if !a.json => {
                 writeln!(
                     out,
-                    "{:10.4} bad {} {}",
+                    "{:10.4} bad {tg}{} {}",
                     b.host_ts_ns as f64 / 1e9,
                     b.kind,
                     b.reason
                 )?;
             }
-            SessionEvent::State(s) => eprintln!("{}", s.label()),
+            SessionEvent::State(s) => eprintln!("{tg}{}", s.label()),
             _ => {}
         }
     }
-    if let Some(mut w) = session.stop_recording() {
-        w.finish()?;
-    }
+    bench.stop_recording()?;
     Ok(ExitCode::SUCCESS)
 }
 
 fn print_channels(
-    session: &Session,
+    bench: &Bench,
     names: &[String],
     json: bool,
     last: &mut std::collections::HashMap<String, u64>,
@@ -399,7 +534,7 @@ fn print_channels(
     let mut row = serde_json::Map::new();
     let mut changed = false;
     for n in names {
-        if let Some(ch) = session.telemetry().get(n) {
+        if let Some(ch) = bench.telemetry().get(n) {
             let total = ch.total();
             if last.get(n) != Some(&total) {
                 changed = true;
@@ -424,21 +559,12 @@ fn print_channels(
 pub fn run(
     dir: &Path,
     sequence: &str,
-    profile: Option<&str>,
-    port: Option<String>,
+    devices: &DeviceArgs,
     report_dir: Option<PathBuf>,
     non_interactive: Option<NonInteractive>,
     vars: &[String],
 ) -> Result<ExitCode> {
-    crate::cmd_run::run(
-        dir,
-        sequence,
-        profile,
-        port,
-        report_dir,
-        non_interactive,
-        vars,
-    )
+    crate::cmd_run::run(dir, sequence, devices, report_dir, non_interactive, vars)
 }
 
 pub fn sim(dir: &Path, bind: &str, port: u16) -> Result<ExitCode> {

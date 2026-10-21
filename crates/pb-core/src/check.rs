@@ -1,10 +1,11 @@
 //! Whole-project checks for CI (`protobench check`).
 //!
-//! Collects the project's own diagnostics (`project.toml` and schema), then
-//! checks every sequence file against the project (commands, message names,
-//! field paths, channels, statistics and variables) and the channels named
-//! in `layout.json`. Each finding points at a file and, where possible, a
-//! line.
+//! Collects the project's own diagnostics (`project.toml`, schema and the
+//! `[[devices]]` projects), then checks every sequence file against the
+//! project and its devices (devices, commands, message names, field paths,
+//! channels, statistics and variables), the channels named in
+//! `layout.json` and the variables of derived expressions. Each finding
+//! points at a file and, where possible, a line.
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -17,21 +18,52 @@ use crate::schema::{resolve_field, FieldPath};
 use crate::sequence::{Assertion, SequenceFile, Step};
 use crate::telemetry::StatsSnapshot;
 
+/// A device as `check` sees it: its config and (if its schema compiled)
+/// its host codec.
+pub struct DeviceCheck<'a> {
+    /// Device name (`main` first).
+    pub name: &'a str,
+    /// Its project config.
+    pub config: &'a ProjectConfig,
+    /// Its host codec.
+    pub codec: Option<Codec>,
+}
+
+/// The devices of a project, `main` first.
+pub fn device_checks(project: &Project) -> Vec<DeviceCheck<'_>> {
+    project
+        .all_devices()
+        .into_iter()
+        .map(|d| DeviceCheck {
+            name: d.name,
+            config: &d.project.config,
+            codec: d
+                .project
+                .schema
+                .as_ref()
+                .filter(|_| d.project.config_ok)
+                .and_then(|s| Codec::new(&d.project.config, s, Role::Host).ok()),
+        })
+        .collect()
+}
+
 /// Every finding for a project, errors first.
 pub fn check_project(project: &Project) -> Vec<Diagnostic> {
     let mut out = project.diagnostics.clone();
-    let codec = project
-        .schema
-        .as_ref()
-        .filter(|_| project.config_ok)
-        .and_then(|s| Codec::new(&project.config, s, Role::Host).ok());
+    let devs = device_checks(project);
     for name in project.sequence_names() {
         let path = project.sequence_path(&name);
-        out.extend(check_sequence_file(&path, &project.config, codec.as_ref()));
+        out.extend(match std::fs::read_to_string(&path) {
+            Ok(src) => check_sequence_devices(&src, &path, &devs),
+            Err(e) => vec![Diagnostic::error(&path, None, format!("cannot read: {e}"))],
+        });
     }
     let layout = project.layout_path();
     if layout.exists() {
-        out.extend(check_layout_file(&layout, &project.config));
+        out.extend(check_layout_devices(&layout, &devs));
+    }
+    if project.config_ok {
+        out.extend(check_derived(project, &devs));
     }
     out.sort_by_key(|d| !d.is_error());
     out
@@ -51,13 +83,24 @@ pub fn check_sequence_file(
     check_sequence_str(&src, path, config, codec)
 }
 
-/// Checks sequence source text (see [`check_sequence_file`]).
+/// Checks sequence source text of a single-device project (see
+/// [`check_sequence_file`]).
 pub fn check_sequence_str(
     src: &str,
     path: &Path,
     config: &ProjectConfig,
     codec: Option<&Codec>,
 ) -> Vec<Diagnostic> {
+    let devs = [DeviceCheck {
+        name: crate::config::MAIN_DEVICE,
+        config,
+        codec: codec.cloned(),
+    }];
+    check_sequence_devices(src, path, &devs)
+}
+
+/// Checks sequence source text against several devices (`main` first).
+pub fn check_sequence_devices(src: &str, path: &Path, devs: &[DeviceCheck<'_>]) -> Vec<Diagnostic> {
     let seq = match SequenceFile::parse(src, path) {
         Ok(s) => s,
         Err(d) => return vec![d],
@@ -65,14 +108,81 @@ pub fn check_sequence_str(
     let lines = step_lines(src);
     let mut c = SeqCheck {
         path,
-        config,
-        codec,
+        devs,
+        config: devs[0].config,
+        codec: devs[0].codec.as_ref(),
         lines: &lines,
         out: Vec::new(),
     };
     c.steps(&seq.steps, "");
     c.vars(src, &seq);
     c.out
+}
+
+/// True if `name` is a channel some device produces: `main`'s plain names
+/// and the other devices' `<device>.<channel>` names.
+pub fn channel_known_on(devs: &[DeviceCheck<'_>], name: &str) -> bool {
+    devs.iter().skip(1).any(|d| {
+        name.strip_prefix(&format!("{}.", d.name))
+            .is_some_and(|rest| channel_known(d.config, rest))
+    }) || devs.first().is_some_and(|m| channel_known(m.config, name))
+}
+
+/// Warns about derived-expression variables that are neither a channel of
+/// any device nor a field of a received message, and about `main` channels
+/// whose names look like another device's (`ref.…`).
+pub fn check_derived(project: &Project, devs: &[DeviceCheck<'_>]) -> Vec<Diagnostic> {
+    let mut out = Vec::new();
+    let file = project.config_path();
+    let rx_types = devs
+        .first()
+        .and_then(|m| m.codec.as_ref())
+        .map(|c| c.rx_types())
+        .unwrap_or_default();
+    for (i, d) in project.config.derived.iter().enumerate() {
+        let Ok(expr) = crate::telemetry::Expr::compile(&d.expr) else {
+            continue; // reported by validation
+        };
+        for var in expr.variables() {
+            let field = FieldPath::parse(var)
+                .ok()
+                .is_some_and(|p| rx_types.iter().any(|t| resolve_field(t, &p).is_ok()));
+            if field || channel_known_on(devs, var) {
+                continue;
+            }
+            let at: [crate::config::Seg; 3] = ["derived".into(), i.into(), "expr".into()];
+            let line = crate::config::locate_line(&project.config_text, &at);
+            out.push(Diagnostic::warning(
+                &file,
+                line,
+                format!(
+                    "derived `{}`: `{var}` is not a channel or field of any device",
+                    d.name
+                ),
+            ));
+        }
+    }
+    let main = &project.config;
+    for dev in devs.iter().skip(1) {
+        let p = format!("{}.", dev.name);
+        let clash = main
+            .telemetry
+            .iter()
+            .flat_map(|t| t.channels.iter())
+            .chain(main.derived.iter().map(|d| &d.name))
+            .find(|c| c.starts_with(&p));
+        if let Some(c) = clash {
+            out.push(Diagnostic::warning(
+                &file,
+                None,
+                format!(
+                    "channel `{c}` of this project looks like a channel of device `{}`; rename one of them",
+                    dev.name
+                ),
+            ));
+        }
+    }
+    out
 }
 
 /// Line of each step: top-level `[[steps]]` tables and the inline tables of
@@ -119,6 +229,8 @@ fn step_lines(src: &str) -> Vec<(String, usize)> {
 
 struct SeqCheck<'a> {
     path: &'a Path,
+    devs: &'a [DeviceCheck<'a>],
+    /// `main`'s config and codec.
     config: &'a ProjectConfig,
     codec: Option<&'a Codec>,
     lines: &'a [(String, usize)],
@@ -162,7 +274,38 @@ impl SeqCheck<'_> {
         }
     }
 
+    /// Checks `step`, with the config and codec of the device it names.
     fn step(&mut self, step: &Step, index: &str) {
+        let Some(name) = step.device() else {
+            return self.step_on(step, index, 0);
+        };
+        match self.devs.iter().position(|d| d.name == name) {
+            Some(i) => self.step_on(step, index, i),
+            None => {
+                let known = self
+                    .devs
+                    .iter()
+                    .map(|d| format!("`{}`", d.name))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.err(
+                    index,
+                    step.action(),
+                    format!("no device `{name}` (this project has {known})"),
+                );
+            }
+        }
+    }
+
+    fn step_on(&mut self, step: &Step, index: &str, dev: usize) {
+        let (config, codec) = (self.devs[dev].config, self.devs[dev].codec.as_ref());
+        let saved = (self.config, self.codec);
+        (self.config, self.codec) = (config, codec);
+        self.step_with(step, index, dev);
+        (self.config, self.codec) = saved;
+    }
+
+    fn step_with(&mut self, step: &Step, index: &str, dev: usize) {
         let action = step.action();
         match step {
             Step::Send {
@@ -175,10 +318,15 @@ impl SeqCheck<'_> {
             } => {
                 if let Some(name) = command.as_deref().filter(|n| !n.contains("${")) {
                     match self.config.command(name) {
-                        None => self.err(
+                        None if dev == 0 => self.err(
                             index,
                             action,
                             format!("no command `{name}` in project.toml"),
+                        ),
+                        None => self.err(
+                            index,
+                            action,
+                            format!("no command `{name}` on device `{}`", self.devs[dev].name),
                         ),
                         Some(cmd) => {
                             if expect.is_none() && cmd.expect.is_none() && !assert.is_empty() {
@@ -242,10 +390,13 @@ impl SeqCheck<'_> {
                 self.check_assert_channels(index, action, assert, false);
             }
             Step::Capture {
-                channels, assert, ..
+                device,
+                channels,
+                assert,
+                ..
             } => {
                 for ch in channels {
-                    if !channel_known(self.config, ch) {
+                    if !self.channel_ok(device.is_some().then_some(dev), ch) {
                         self.err(index, action, format!("unknown channel `{ch}`"));
                     }
                 }
@@ -261,10 +412,14 @@ impl SeqCheck<'_> {
                         self.err(index, action, "capture assertion needs `channel`".into());
                     }
                 }
-                self.check_assert_channels(index, action, assert, true);
+                let relative = device.is_some().then_some(dev);
+                self.check_assert_channels_on(index, action, assert, true, relative);
             }
             Step::Loop { steps, .. } => {
+                let saved = (self.config, self.codec);
+                (self.config, self.codec) = (self.devs[0].config, self.devs[0].codec.as_ref());
                 self.steps(steps, &format!("{index}."));
+                (self.config, self.codec) = saved;
             }
             Step::PromptOperator { inputs, .. } => {
                 let mut seen = BTreeSet::new();
@@ -338,6 +493,15 @@ impl SeqCheck<'_> {
         }
     }
 
+    /// True if `ch` is a channel: of device `relative` by its own name, or
+    /// of any device by its full name.
+    fn channel_ok(&self, relative: Option<usize>, ch: &str) -> bool {
+        match relative {
+            Some(i) => channel_known(self.devs[i].config, ch),
+            None => channel_known_on(self.devs, ch),
+        }
+    }
+
     fn check_assert_channels(
         &mut self,
         index: &str,
@@ -345,9 +509,20 @@ impl SeqCheck<'_> {
         asserts: &[Assertion],
         capture: bool,
     ) {
+        self.check_assert_channels_on(index, action, asserts, capture, None)
+    }
+
+    fn check_assert_channels_on(
+        &mut self,
+        index: &str,
+        action: &str,
+        asserts: &[Assertion],
+        capture: bool,
+        relative: Option<usize>,
+    ) {
         for a in asserts {
             if let Some(ch) = &a.channel {
-                if !channel_known(self.config, ch) {
+                if !self.channel_ok(relative, ch) {
                     self.err(index, action, format!("unknown channel `{ch}`"));
                 }
             }
@@ -519,6 +694,17 @@ fn strip_index(s: &str) -> Option<&str> {
 /// one the project produces (unknown channels are warnings: the panel just
 /// stays empty).
 pub fn check_layout_file(path: &Path, config: &ProjectConfig) -> Vec<Diagnostic> {
+    let devs = [DeviceCheck {
+        name: crate::config::MAIN_DEVICE,
+        config,
+        codec: None,
+    }];
+    check_layout_devices(path, &devs)
+}
+
+/// Like [`check_layout_file`] with several devices: other devices'
+/// channels are named `<device>.<channel>`.
+pub fn check_layout_devices(path: &Path, devs: &[DeviceCheck<'_>]) -> Vec<Diagnostic> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) => return vec![Diagnostic::error(path, None, format!("cannot read: {e}"))],
@@ -535,7 +721,7 @@ pub fn check_layout_file(path: &Path, config: &ProjectConfig) -> Vec<Diagnostic>
     collect_layout_channels(&json, false, &mut names);
     names
         .into_iter()
-        .filter(|n| !channel_known(config, n))
+        .filter(|n| !channel_known_on(devs, n))
         .map(|n| {
             let line = text.find(&format!("\"{n}\"")).map(|o| line_col(&text, o).0);
             Diagnostic::warning(path, line, format!("layout uses unknown channel `{n}`"))
@@ -631,6 +817,86 @@ mod tests {
             has(line_of("name = \"rec\"") - 1, "replay needs `file`"),
             "{d:#?}"
         );
+    }
+
+    #[test]
+    fn device_steps_resolve_against_their_device() {
+        let p = demo();
+        let devs = device_checks(&p);
+        let src = r#"
+[[steps]]
+action = "send"
+device = "ref"
+command = "Ping"
+assert = [ { path = "pong.model", ne = "" } ]
+
+[[steps]]
+action = "send"
+device = "ref"
+command = "Set Bias"
+
+[[steps]]
+action = "expect"
+device = "ref"
+message = "telemetry"
+
+[[steps]]
+action = "capture"
+device = "ref"
+channels = ["reading.vout_mv", "ref.reading.vout_mv"]
+duration_ms = 10
+
+[[steps]]
+action = "capture"
+channels = ["ref.reading.vout_mv", "err_mv", "reading.vout_mv"]
+duration_ms = 10
+
+[[steps]]
+action = "send"
+device = "meter2"
+command = "Ping"
+"#;
+        let d = check_sequence_devices(src, Path::new("s.toml"), &devs);
+        let text: Vec<String> = d.iter().map(|d| d.to_string()).collect();
+        let has = |line: usize, m: &str| {
+            text.iter()
+                .any(|t| t.starts_with(&format!("s.toml:{line}:")) && t.contains(m))
+        };
+        assert!(has(8, "no command `Set Bias` on device `ref`"), "{text:#?}");
+        assert!(has(13, "telemetry"), "{text:#?}");
+        // With a device, names are its own: the prefixed one is unknown.
+        assert!(
+            has(18, "unknown channel `ref.reading.vout_mv`"),
+            "{text:#?}"
+        );
+        // Without, other devices' channels carry the prefix.
+        assert!(has(24, "unknown channel `reading.vout_mv`"), "{text:#?}");
+        assert!(has(29, "no device `meter2`"), "{text:#?}");
+        assert_eq!(text.len(), 5, "{text:#?}");
+    }
+
+    #[test]
+    fn derived_variables_and_name_clashes() {
+        let mut text = std::fs::read_to_string(demo().config_path()).unwrap();
+        text = text.replace(
+            "expr = \"telemetry.vout_raw * 0.0503 - ref.reading.vout_mv\"",
+            "expr = \"telemetry.vout_raw * 0.0503 - ref.reading.vout_v\"",
+        );
+        text.push_str("\n[[derived]]\nname = \"ref.fake\"\nexpr = \"telemetry.current_na * 2\"\n");
+        let p = Project::from_text(crate::schema::tests::demo_dir(), text);
+        let d: Vec<String> = check_project(&p).iter().map(|d| d.to_string()).collect();
+        assert!(
+            d.iter().any(|t| t.contains("warning: derived `err_mv`: `ref.reading.vout_v` is not a channel or field of any device")),
+            "{d:#?}"
+        );
+        assert!(
+            d.iter().any(|t| t.contains(
+                "channel `ref.fake` of this project looks like a channel of device `ref`"
+            )),
+            "{d:#?}"
+        );
+        // power_uw reads fields of the received message: fine.
+        assert!(!d.iter().any(|t| t.contains("power_uw")), "{d:#?}");
     }
 
     #[test]

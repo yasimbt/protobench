@@ -1,0 +1,58 @@
+// Reference meter for the demo sensor bench.
+//
+// A second device with its own firmware and protocol: SLIP framing with a
+// CRC-8, and its own envelope messages. The demo sensor project lists it as
+// device `ref`, so a sequence can compare the sensor with the meter.
+syntax = "proto3";
+
+package ref;
+
+// Liveness check. The meter answers with Pong.
+message Ping {}
+
+// Reply to Ping.
+message Pong {
+  // Meter model string.
+  string model = 1;
+}
+
+// Start or stop the reading stream.
+message StreamCtrl {
+  // true starts the stream, false stops it.
+  bool enable = 1;
+}
+
+// Acknowledgement.
+message Ack {
+  // true if the command was accepted.
+  bool ok = 1;
+}
+
+// One reading of the meter.
+message Reading {
+  // Measured voltage in millivolts.
+  float vout_mv = 1;
+  // Running sample number.
+  uint32 sample = 2;
+}
+
+// Everything the host sends to the meter.
+message HostToMeter {
+  // Correlation id; the meter echoes it in the reply.
+  uint32 seq = 1;
+  oneof cmd {
+    Ping ping = 2;
+    StreamCtrl stream_ctrl = 3;
+  }
+}
+
+// Everything the meter sends.
+message MeterToHost {
+  // Echo of HostToMeter.seq for replies; 0 for readings.
+  uint32 seq = 1;
+  oneof msg {
+    Pong pong = 2;
+    Ack ack = 3;
+    Reading reading = 4;
+  }
+}

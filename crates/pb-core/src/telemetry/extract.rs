@@ -36,6 +36,8 @@ pub struct Extractor {
     subs: Vec<Subscription>,
     derived: Vec<Derived>,
     fields: Vec<crate::config::FieldMeta>,
+    /// Prepended to every channel name (`ref.` for device `ref`).
+    prefix: String,
 }
 
 /// State of a triggered capture.
@@ -104,7 +106,15 @@ impl Extractor {
             subs,
             derived,
             fields: config.fields.clone(),
+            prefix: String::new(),
         })
+    }
+
+    /// Names channels `<prefix><name>` in the store (`ref.` for device
+    /// `ref`). Derived expressions still use the device's own names.
+    pub fn with_prefix(mut self, prefix: &str) -> Extractor {
+        self.prefix = prefix.to_string();
+        self
     }
 
     /// Arms a triggered capture by telemetry name. Returns false if unknown.
@@ -174,7 +184,8 @@ impl Extractor {
                         continue;
                     };
                     let fields = &self.fields;
-                    let ch = store.get_or_create(&e.name, || {
+                    let full = format!("{}{}", self.prefix, e.name);
+                    let ch = store.get_or_create(&full, || {
                         let kind = match (e.field.kind(), &e.value) {
                             (Kind::Enum(d), _) => ChannelKind::Enum(d),
                             (_, Value::Bool(_)) => ChannelKind::Bool,
@@ -192,6 +203,7 @@ impl Extractor {
                 }
             }
         }
+        let prefix = &self.prefix;
         for d in &mut self.derived {
             let mut any_here = false;
             let (vars, paths) = (&d.vars, &d.paths);
@@ -210,12 +222,19 @@ impl Extractor {
                         return Some(v);
                     }
                 }
-                store.get(var).and_then(|c| c.last()).map(|(_, v)| v)
+                // This device's channels, then any device's by full name
+                // (`ref.reading.vout_mv` from main).
+                store
+                    .get(&format!("{prefix}{var}"))
+                    .or_else(|| (!prefix.is_empty()).then(|| store.get(var)).flatten())
+                    .and_then(|c| c.last())
+                    .map(|(_, v)| v)
             });
             if let Ok(Some(v)) = r {
                 if any_here && v.is_finite() {
                     let display = d.display.clone();
-                    let ch = store.get_or_create(&d.name, || (display, ChannelKind::Derived));
+                    let name = format!("{prefix}{}", d.name);
+                    let ch = store.get_or_create(&name, || (display, ChannelKind::Derived));
                     ch.push(t, v);
                     written += 1;
                 }

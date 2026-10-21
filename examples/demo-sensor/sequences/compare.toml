@@ -1,0 +1,58 @@
+name = "Compare with the reference meter"
+description = "Set the bias, stream the sensor and the meter (device `ref`) together, check that they agree"
+
+[vars]
+bias_mv = 200
+
+[[steps]]
+action = "send"
+command = "Ping"
+expect = "pong"
+
+[[steps]]
+action = "send"
+device = "ref"                         # the reference meter, a project of its own
+command = "Ping"
+assert = [ { path = "pong.model", ne = "" } ]
+
+[[steps]]
+action = "send"
+message = "set_bias"
+payload = { millivolts = "${bias_mv}" }
+expect = "ack"
+assert = [ { path = "ack.ok", eq = true } ]
+
+[[steps]]
+action = "send"
+command = "Start Stream"
+
+# Both devices share one time axis; err_mv = sensor Vout - ref.reading.vout_mv.
+# 2 s is four periods of the 2 Hz test signal, so its mean is the offset.
+[[steps]]
+action = "capture"
+channels = ["telemetry.vout_raw", "ref.reading.vout_mv", "err_mv"]
+duration_ms = 2000
+assert = [
+  { channel = "err_mv", stat = "mean", min = -5, max = 5 },
+  { channel = "ref.reading.vout_mv", stat = "rate_hz", min = 50 },
+  { channel = "telemetry.vout_raw", stat = "rate_hz", min = 900 },
+]
+
+# With a device, channel names are that device's own.
+[[steps]]
+action = "capture"
+device = "ref"
+channels = ["reading.vout_mv"]
+duration_ms = 500
+assert = [ { channel = "reading.vout_mv", stat = "max", max = 160 } ]
+
+[[steps]]
+action = "expect"
+device = "ref"
+message = "reading"
+timeout_ms = 500
+assert = [ { path = "reading.vout_mv", min = 0, max = 160 } ]
+
+[[steps]]
+action = "log"
+text = "sensor and reference agree at ${bias_mv} mV bias"

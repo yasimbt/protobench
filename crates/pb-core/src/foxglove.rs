@@ -9,8 +9,10 @@
 //! ```
 //!
 //! Topics are the MCAP export's (see [`crate::topics`]): protobuf channels
-//! carry the project's `FileDescriptorSet` as their schema, `/text` and
+//! carry their device's `FileDescriptorSet` as their schema, `/text` and
 //! `/markers` are JSON. Topics that appear later are advertised on the fly.
+//! With several devices, each device's topics live under its name
+//! (`/ref/rx/reading`) and carry its own schema.
 //!
 //! One thread accepts connections and one thread serves each client,
 //! consistent with the rest of `pb-core` (no async runtime). A client that
@@ -83,9 +85,22 @@ struct Registry {
     clients: Vec<Arc<Client>>,
 }
 
+/// A device served by [`FoxgloveServer::start_devices`].
+#[derive(Debug, Clone)]
+pub struct FoxgloveDevice {
+    /// Device name (`main` keeps the plain topics).
+    pub name: String,
+    /// Encoded `FileDescriptorSet` of the device's schema.
+    pub fds: Vec<u8>,
+    /// Topics to advertise from the start
+    /// ([`crate::topics::known_topics_on`]).
+    pub topics: Vec<TopicInfo>,
+}
+
 struct Inner {
     name: String,
-    fds_b64: String,
+    /// Device name and base64 descriptor set, by device index.
+    schemas: Vec<(String, String)>,
     registry: Mutex<Registry>,
     stop: AtomicBool,
     published: AtomicU64,
@@ -93,14 +108,24 @@ struct Inner {
 }
 
 impl Inner {
-    fn channel_def(&self, id: u32, topic: &str, schema_name: Option<&str>) -> ChannelDef {
+    fn channel_def(
+        &self,
+        id: u32,
+        topic: &str,
+        schema_name: Option<&str>,
+        device: usize,
+    ) -> ChannelDef {
         match schema_name {
             Some(n) => ChannelDef {
                 id,
                 topic: topic.to_string(),
                 encoding: "protobuf",
                 schema_name: n.to_string(),
-                schema: self.fds_b64.clone(),
+                schema: self
+                    .schemas
+                    .get(device)
+                    .map(|s| s.1.clone())
+                    .unwrap_or_default(),
                 schema_encoding: "protobuf",
             },
             None => {
@@ -121,14 +146,15 @@ impl Inner {
         }
     }
 
-    /// Channel id for a topic, advertising it to every client if new.
-    fn channel_for(&self, topic: &str, schema_name: Option<&str>) -> u32 {
+    /// Channel id for a topic of device `device`, advertising it to every
+    /// client if new.
+    fn channel_for(&self, topic: &str, schema_name: Option<&str>, device: usize) -> u32 {
         let mut reg = self.registry.lock();
         if let Some(id) = reg.by_topic.get(topic) {
             return *id;
         }
         let id = reg.channels.len() as u32 + 1;
-        let def = self.channel_def(id, topic, schema_name);
+        let def = self.channel_def(id, topic, schema_name, device);
         let msg = json!({ "op": "advertise", "channels": [def.to_json()] }).to_string();
         for c in &reg.clients {
             let _ = c.tx.try_send(Out::Text(msg.clone()));
@@ -138,8 +164,8 @@ impl Inner {
         id
     }
 
-    fn publish(&self, m: &TopicMessage, log_time_ns: u64) {
-        let ch = self.channel_for(&m.topic, m.schema_name.as_deref());
+    fn publish(&self, m: &TopicMessage, log_time_ns: u64, device: usize) {
+        let ch = self.channel_for(&m.topic, m.schema_name.as_deref(), device);
         let clients = self.registry.lock().clients.clone();
         for c in clients {
             let subs: Vec<u32> = c
@@ -186,20 +212,51 @@ impl FoxgloveServer {
         fds: &[u8],
         topics: &[TopicInfo],
     ) -> Result<FoxgloveServer, CoreError> {
+        Self::start_devices(
+            bind,
+            port,
+            name,
+            &[FoxgloveDevice {
+                name: crate::config::MAIN_DEVICE.into(),
+                fds: fds.to_vec(),
+                topics: topics.to_vec(),
+            }],
+        )
+    }
+
+    /// Like [`FoxgloveServer::start`] for several devices, each with its
+    /// own schema and topics. Attach each device's session with
+    /// [`FoxgloveServer::attach_device`].
+    pub fn start_devices(
+        bind: &str,
+        port: u16,
+        name: &str,
+        devices: &[FoxgloveDevice],
+    ) -> Result<FoxgloveServer, CoreError> {
         let listener = TcpListener::bind((bind, port))
             .map_err(|e| CoreError::Transport(format!("foxglove: bind {bind}:{port}: {e}")))?;
         listener.set_nonblocking(true)?;
         let addr = listener.local_addr()?;
         let inner = Arc::new(Inner {
             name: name.to_string(),
-            fds_b64: base64::engine::general_purpose::STANDARD.encode(fds),
+            schemas: devices
+                .iter()
+                .map(|d| {
+                    (
+                        d.name.clone(),
+                        base64::engine::general_purpose::STANDARD.encode(&d.fds),
+                    )
+                })
+                .collect(),
             registry: Mutex::new(Registry::default()),
             stop: AtomicBool::new(false),
             published: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
         });
-        for t in topics {
-            inner.channel_for(&t.topic, t.schema_name.as_deref());
+        for (i, d) in devices.iter().enumerate() {
+            for t in &d.topics {
+                inner.channel_for(&t.topic, t.schema_name.as_deref(), i);
+            }
         }
         let i2 = inner.clone();
         let accept = std::thread::Builder::new()
@@ -232,9 +289,9 @@ impl FoxgloveServer {
         )
     }
 
-    /// Publishes one message at `log_time_ns` (Unix ns).
+    /// Publishes one message of `main` at `log_time_ns` (Unix ns).
     pub fn publish(&self, m: &TopicMessage, log_time_ns: u64) {
-        self.inner.publish(m, log_time_ns);
+        self.inner.publish(m, log_time_ns, 0);
     }
 
     /// Forwards session events (decoded messages, text lines, markers) until
@@ -242,7 +299,24 @@ impl FoxgloveServer {
     /// session timestamps into Unix time
     /// ([`crate::session::Session::wall_offset_ns`]).
     pub fn attach(&self, events: Receiver<SessionEvent>, wall_offset_ns: u64) -> JoinHandle<()> {
+        self.attach_device(events, wall_offset_ns, crate::config::MAIN_DEVICE)
+    }
+
+    /// Like [`FoxgloveServer::attach`] for the session of `device`, whose
+    /// topics live under its name.
+    pub fn attach_device(
+        &self,
+        events: Receiver<SessionEvent>,
+        wall_offset_ns: u64,
+        device: &str,
+    ) -> JoinHandle<()> {
         let inner = self.inner.clone();
+        let index = inner
+            .schemas
+            .iter()
+            .position(|(n, _)| n == device)
+            .unwrap_or(0);
+        let device = device.to_string();
         std::thread::spawn(move || loop {
             if inner.stop.load(Ordering::Relaxed) {
                 return;
@@ -254,15 +328,17 @@ impl FoxgloveServer {
             };
             let (m, ts) = match ev {
                 SessionEvent::Message { dir, msg } => {
-                    (topics::for_message(&msg, dir), msg.host_ts_ns)
+                    (topics::for_message_on(&device, &msg, dir), msg.host_ts_ns)
                 }
-                SessionEvent::Text { host_ts_ns, line } => (topics::for_text(&line), host_ts_ns),
+                SessionEvent::Text { host_ts_ns, line } => {
+                    (topics::for_text_on(&device, &line), host_ts_ns)
+                }
                 SessionEvent::Marker { host_ts_ns, text } => {
                     (topics::for_marker(&text), host_ts_ns)
                 }
                 _ => continue,
             };
-            inner.publish(&m, wall_offset_ns.saturating_add(ts));
+            inner.publish(&m, wall_offset_ns.saturating_add(ts), index);
         })
     }
 }

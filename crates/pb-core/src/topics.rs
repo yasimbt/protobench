@@ -6,6 +6,8 @@
 //!   message without the ID prefix.
 //! - Text lines go to `/text` (`{"text": …}`) and markers to `/markers`
 //!   (`{"label": …}`), JSON encoded.
+//! - A device other than `main` gets its topics under its name:
+//!   `/ref/rx/reading`, `/ref/tx/ping`, `/ref/text`. Markers stay `/markers`.
 
 use prost::Message as _;
 use prost_reflect::{Kind, MessageDescriptor, ReflectMessage, Value};
@@ -55,8 +57,23 @@ fn dir_name(dir: Direction) -> &'static str {
     }
 }
 
-/// Topic and payload of a decoded message.
+/// Topic prefix of a device: empty for `main`, else `/<device>`.
+pub fn device_root(device: &str) -> String {
+    if device == crate::config::MAIN_DEVICE {
+        String::new()
+    } else {
+        format!("/{device}")
+    }
+}
+
+/// Topic and payload of a decoded message of `main`.
 pub fn for_message(m: &DecodedMessage, dir: Direction) -> TopicMessage {
+    for_message_on(crate::config::MAIN_DEVICE, m, dir)
+}
+
+/// Topic and payload of a decoded message of `device`.
+pub fn for_message_on(device: &str, m: &DecodedMessage, dir: Direction) -> TopicMessage {
+    let root = device_root(device);
     let dir = dir_name(dir);
     // Envelope: publish the oneof member's message on its own topic.
     let inner = m
@@ -69,14 +86,14 @@ pub fn for_message(m: &DecodedMessage, dir: Direction) -> TopicMessage {
         });
     match inner {
         Some((name, im)) => TopicMessage {
-            topic: format!("/{dir}/{name}"),
+            topic: format!("{root}/{dir}/{name}"),
             schema_name: Some(im.descriptor().full_name().to_string()),
             encoding: "protobuf",
             data: im.encode_to_vec(),
         },
         None => TopicMessage {
             topic: format!(
-                "/{dir}/{}",
+                "{root}/{dir}/{}",
                 m.type_name.rsplit('.').next().unwrap_or(&m.type_name)
             ),
             schema_name: Some(m.type_name.clone()),
@@ -88,8 +105,13 @@ pub fn for_message(m: &DecodedMessage, dir: Direction) -> TopicMessage {
 
 /// A `/text` message.
 pub fn for_text(line: &str) -> TopicMessage {
+    for_text_on(crate::config::MAIN_DEVICE, line)
+}
+
+/// A text line of `device` (`/text`, or `/<device>/text`).
+pub fn for_text_on(device: &str, line: &str) -> TopicMessage {
     TopicMessage {
-        topic: TEXT_TOPIC.into(),
+        topic: format!("{}{TEXT_TOPIC}", device_root(device)),
         schema_name: None,
         encoding: "json",
         data: serde_json::json!({ "text": line }).to_string().into_bytes(),
@@ -108,7 +130,12 @@ pub fn for_marker(label: &str) -> TopicMessage {
     }
 }
 
-fn type_topics(dir: Direction, types: &[MessageDescriptor], envelope: bool) -> Vec<TopicInfo> {
+fn type_topics(
+    root: &str,
+    dir: Direction,
+    types: &[MessageDescriptor],
+    envelope: bool,
+) -> Vec<TopicInfo> {
     let d = dir_name(dir);
     let mut out = Vec::new();
     for t in types {
@@ -125,13 +152,13 @@ fn type_topics(dir: Direction, types: &[MessageDescriptor], envelope: bool) -> V
         };
         if members.is_empty() {
             out.push(TopicInfo {
-                topic: format!("/{d}/{}", t.name()),
+                topic: format!("{root}/{d}/{}", t.name()),
                 schema_name: Some(t.full_name().to_string()),
             });
         }
         for (name, m) in members {
             out.push(TopicInfo {
-                topic: format!("/{d}/{name}"),
+                topic: format!("{root}/{d}/{name}"),
                 schema_name: Some(m.full_name().to_string()),
             });
         }
@@ -139,19 +166,33 @@ fn type_topics(dir: Direction, types: &[MessageDescriptor], envelope: bool) -> V
     out
 }
 
-/// Every topic a session with this codec can produce.
+/// Every topic a session of `main` with this codec can produce.
 pub fn known_topics(codec: &Codec) -> Vec<TopicInfo> {
+    known_topics_on(crate::config::MAIN_DEVICE, codec)
+}
+
+/// Every topic a session of `device` with this codec can produce
+/// (`/markers` belongs to `main`).
+pub fn known_topics_on(device: &str, codec: &Codec) -> Vec<TopicInfo> {
+    let root = device_root(device);
     let envelope = codec.mode() == CodecMode::Envelope;
-    let mut out = type_topics(Direction::Rx, &codec.rx_types(), envelope);
-    out.extend(type_topics(Direction::Tx, &codec.tx_types(), envelope));
+    let mut out = type_topics(&root, Direction::Rx, &codec.rx_types(), envelope);
+    out.extend(type_topics(
+        &root,
+        Direction::Tx,
+        &codec.tx_types(),
+        envelope,
+    ));
     out.push(TopicInfo {
-        topic: TEXT_TOPIC.into(),
+        topic: format!("{root}{TEXT_TOPIC}"),
         schema_name: None,
     });
-    out.push(TopicInfo {
-        topic: MARKER_TOPIC.into(),
-        schema_name: None,
-    });
+    if root.is_empty() {
+        out.push(TopicInfo {
+            topic: MARKER_TOPIC.into(),
+            schema_name: None,
+        });
+    }
     out
 }
 
@@ -193,5 +234,17 @@ mod tests {
             Some(7)
         );
         assert_eq!(for_text("hi").data, br#"{"text":"hi"}"#.to_vec());
+        // Another device's topics live under its name.
+        assert_eq!(
+            for_message_on("ref", &d, Direction::Rx).topic,
+            "/ref/rx/telemetry"
+        );
+        assert_eq!(for_text_on("ref", "x").topic, "/ref/text");
+        let other: Vec<String> = known_topics_on("ref", &host)
+            .into_iter()
+            .map(|t| t.topic)
+            .collect();
+        assert!(other.contains(&"/ref/tx/set_bias".to_string()), "{other:?}");
+        assert!(!other.iter().any(|t| t == "/markers" || t == "/text"));
     }
 }

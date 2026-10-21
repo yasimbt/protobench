@@ -8,16 +8,17 @@ use std::process::ExitCode;
 
 use anyhow::{anyhow, Result};
 
+use pb_core::config::MAIN_DEVICE;
 use pb_core::project::Project;
-use pb_core::sequence::{run_sequence, RunEvent, RunOptions, SequenceFile, StepStatus};
+use pb_core::sequence::{run_sequence_on, RunEvent, RunOptions, SequenceFile, StepStatus};
 
+use crate::cmd::DeviceArgs;
 use crate::NonInteractive;
 
 pub fn run(
     dir: &Path,
     sequence: &str,
-    profile: Option<&str>,
-    port: Option<String>,
+    devices: &DeviceArgs,
     report_dir: Option<PathBuf>,
     ni: Option<NonInteractive>,
     vars: &[String],
@@ -32,8 +33,20 @@ pub fn run(
     }
     let path = p.sequence_path(sequence);
     let seq = SequenceFile::load(&path)?;
-    let session = crate::cmd::connect(&p, profile, port)?;
-    eprintln!("running `{}` on {}", seq.name, session.endpoint());
+    let only: Vec<&str> = devices.only.iter().map(String::as_str).collect();
+    let bench = crate::cmd::connect_devices(&p, devices, &only, MAIN_DEVICE)?;
+    let on: Vec<String> = bench
+        .devices()
+        .iter()
+        .map(|d| {
+            if d.name == MAIN_DEVICE && bench.devices().len() == 1 {
+                d.session.endpoint()
+            } else {
+                format!("{} ({})", d.name, d.session.endpoint())
+            }
+        })
+        .collect();
+    eprintln!("running `{}` on {}", seq.name, on.join(", "));
     let opts = RunOptions {
         non_interactive: ni.map(|n| match n {
             NonInteractive::Fail => pb_core::sequence::NonInteractive::Fail,
@@ -70,7 +83,8 @@ pub fn run(
         RunEvent::Log(l) => eprintln!("  log: {l}"),
         RunEvent::Finished(_) => {}
     };
-    let report = run_sequence(&session, &p.config, &seq, opts, &mut on_event, None);
+    let targets = bench.targets(&p);
+    let report = run_sequence_on(&targets, &seq, opts, &mut on_event, None);
     let dir = report_dir.unwrap_or_else(|| p.dir.join("reports"));
     let stem = path
         .file_stem()
@@ -89,11 +103,12 @@ pub fn run(
     );
     println!("report: {}", json.display());
     println!("junit:  {}", xml.display());
-    // A connection error mid-run counts as a configuration/connection error.
-    let conn_lost = report
-        .steps
-        .iter()
-        .any(|st| st.status == StepStatus::Error && st.message.as_deref() == Some("not connected"));
+    // A connection error mid-run, or a device the steps need that is not
+    // there, counts as a configuration/connection error.
+    let conn_lost = report.steps.iter().any(|st| {
+        st.status == StepStatus::Error
+            && (st.message.as_deref() == Some("not connected") || st.action == "devices")
+    });
     Ok(if report.passed {
         ExitCode::SUCCESS
     } else if conn_lost {

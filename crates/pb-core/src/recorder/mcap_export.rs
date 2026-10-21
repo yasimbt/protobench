@@ -19,8 +19,9 @@ fn err(e: impl std::fmt::Display) -> CoreError {
 pub fn export_mcap(session: &OfflineSession, path: &Path) -> Result<usize, CoreError> {
     let f = std::fs::File::create(path).map_err(|e| CoreError::io(path, e))?;
     let mut w = mcap::Writer::new(BufWriter::new(f)).map_err(err)?;
-    let fds = session.schema.fds_bytes().to_vec();
-    let mut schemas: HashMap<String, u16> = HashMap::new();
+    // Schemas are per device: two devices may use the same type name with
+    // different descriptor sets.
+    let mut schemas: HashMap<(u8, String), u16> = HashMap::new();
     let mut channels: HashMap<String, u16> = HashMap::new();
     let mut seq: HashMap<u16, u32> = HashMap::new();
     let empty = BTreeMap::new();
@@ -29,11 +30,12 @@ pub fn export_mcap(session: &OfflineSession, path: &Path) -> Result<usize, CoreE
     let mut count = 0usize;
     for d in session.decoded() {
         let log_time = base + d.record.host_ts_ns.saturating_sub(first);
+        let dev = d.device.as_str();
         let tm = match (&d.msg, d.record.kind) {
-            (Some(m), RecordKind::TxFrame) => topics::for_message(m, Direction::Tx),
-            (Some(m), _) => topics::for_message(m, Direction::Rx),
+            (Some(m), RecordKind::TxFrame) => topics::for_message_on(dev, m, Direction::Tx),
+            (Some(m), _) => topics::for_message_on(dev, m, Direction::Rx),
             (None, RecordKind::TextLine) => {
-                topics::for_text(&String::from_utf8_lossy(&d.record.bytes))
+                topics::for_text_on(dev, &String::from_utf8_lossy(&d.record.bytes))
             }
             (None, RecordKind::Marker) => {
                 topics::for_marker(&String::from_utf8_lossy(&d.record.bytes))
@@ -47,11 +49,16 @@ pub fn export_mcap(session: &OfflineSession, path: &Path) -> Result<usize, CoreE
             data,
         } = tm;
         let schema_id = match &schema_name {
-            Some(n) => match schemas.get(n) {
+            Some(n) => match schemas.get(&(d.record.device, n.clone())) {
                 Some(id) => *id,
                 None => {
-                    let id = w.add_schema(n, "protobuf", &fds).map_err(err)?;
-                    schemas.insert(n.clone(), id);
+                    let Some(dev) = session.devices.get(usize::from(d.record.device)) else {
+                        continue;
+                    };
+                    let id = w
+                        .add_schema(n, "protobuf", dev.schema.fds_bytes())
+                        .map_err(err)?;
+                    schemas.insert((d.record.device, n.clone()), id);
                     id
                 }
             },

@@ -550,7 +550,7 @@ pub fn sim_factory(project: &Project) -> Result<SimFactory, CoreError> {
             .name("protobench-sim".into())
             .spawn(move || sim.run(Box::new(dev), stop))
             .map_err(CoreError::IoBare)?;
-        Ok(Box::new(host) as Box<dyn Transport>)
+        Ok(Box::new(host.named("simulator (loopback)")) as Box<dyn Transport>)
     }))
 }
 

@@ -1,0 +1,93 @@
+config_version = 1
+name = "Demo Reference"
+description = "Example reference meter, connected next to the demo sensor as device `ref`"
+
+[schema]
+proto_files   = ["proto/reference.proto"]
+include_paths = ["proto"]
+
+[connection]
+profile = "sim"
+
+[[connection.profiles]]
+name = "sim"
+transport = "sim"
+
+[[connection.profiles]]
+name = "usb"
+transport = "serial"
+port = "auto"
+usb_vid = 0x10c4                  # a CP2102 adapter, for example
+usb_pid = 0xea60
+baud = 115200
+
+[framing]
+type = "slip"                     # a different firmware convention from the sensor's COBS
+crc = "crc8"
+max_frame_len = 256
+
+[codec]
+mode = "envelope"
+tx_root = "ref.HostToMeter"
+rx_root = "ref.MeterToHost"
+
+[correlation]
+request_field  = "seq"
+response_field = "seq"
+default_timeout_ms = 500
+
+[[fields]]
+path = "reading.vout_mv"
+display = "Reference Vout"
+unit = "mV"
+format = "{:.2}"
+
+[[commands]]
+name = "Ping"
+group = "System"
+message = "ping"
+expect = "pong"
+
+[[commands]]
+name = "Start Stream"
+group = "Stream"
+message = "stream_ctrl"
+payload = { enable = true }
+expect = "ack"
+
+[[commands]]
+name = "Stop Stream"
+group = "Stream"
+message = "stream_ctrl"
+payload = { enable = false }
+expect = "ack"
+
+[[telemetry]]
+name = "Readings"
+mode = "stream"
+message = "reading"
+channels = ["reading.vout_mv", "reading.sample"]
+
+# ---------- simulator ----------
+# The simulated meter measures the same waveform the demo sensor's simulator
+# produces on Vout (1600 ± 1500 counts × 0.0503 mV at 2 Hz), at 100 Hz.
+[simulator]
+latency_ms = 1
+log_interval_ms = 0
+
+[[simulator.streams]]
+message = "reading"
+rate_hz = 100
+start_enabled = true
+fields = { "vout_mv" = "sine(amp=75.45, offset=80.48, freq=2)", "sample" = "counter()" }
+
+[[simulator.responses]]
+on = "ping"
+reply = "pong"
+payload = { model = "SIM-REF-1" }
+
+[[simulator.responses]]
+on = "stream_ctrl"
+reply = "ack"
+payload = { ok = true }
+action = "toggle_stream:reading"

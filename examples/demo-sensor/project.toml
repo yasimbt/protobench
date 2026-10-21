@@ -36,6 +36,15 @@ transport = "tcp_client"
 host = "192.168.1.50"
 tcp_port = 9000
 
+# ---------- other devices on the bench ----------
+# Each device is a project of its own; its channels appear here as
+# <name>.<channel> (ref.reading.vout_mv) and sequences address it with
+# device = "ref". Connect only this board with `--only main`.
+[[devices]]
+name = "ref"
+project = "../demo-reference"
+profile = "sim"                                # that project's profile; its default when omitted
+
 [framing]
 type = "cobs"                     # cobs | slip | varint_len | fixed_len | none
 # len_bytes = 2                   # for fixed_len: 1 | 2 | 4
@@ -145,6 +154,12 @@ channels = ["status.battery_mv", "status.uptime_s", "status.fault_flags"]
 name = "power_uw"
 expr = "telemetry.vout_raw * 0.0503 * telemetry.current_na / 1000"
 unit = "uW"
+
+[[derived]]
+name = "err_mv"                   # sensor minus reference meter (device `ref`)
+expr = "telemetry.vout_raw * 0.0503 - ref.reading.vout_mv"
+unit = "mV"
+format = "{:.2}"
 
 # ---------- simulator ----------
 [simulator]

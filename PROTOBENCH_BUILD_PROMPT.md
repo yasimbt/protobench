@@ -613,3 +613,111 @@ Still **[LATER]** because they need hardware, a broker or a second runtime that 
 6. The Parquet round-trip test passes, and `protobench decode <file> --parquet out.parquet` writes a file that reads back with the same rows and columns as the CSV export.
 7. `protobench-gui --smoke-test` passes headless.
 8. The documentation describes the round-2 behaviour.
+
+---
+
+## Part D — Round 4 (milestones 20–29)
+
+> Tell Claude Code: **"Read PROTOBENCH_BUILD_PROMPT.md, review the current build and follow the Part D milestones in order. Do not stop until every Part D acceptance criterion passes."**
+
+Round 2 (Part C) promoted the [LATER] items that need no hardware. Round 3 was one change outside this file (commit `1b45afd`: operator inputs on `prompt_operator`, `run --var`, the GUI Variables table). Round 4 lets one project talk to several different devices at once (D2b). It also builds the rest of the [LATER] list (MQTT, CAN, SEGGER RTT, Python bindings and BLE) and adds CI and a few serial-bench improvements. Parts A–C still apply; where Part D differs, Part D wins.
+
+Each new link is tested here against a simulator or a mock, so the build can be finished without hardware. Real hardware is checked afterwards with the bench checklist in D6, which is not part of the acceptance criteria.
+
+### D1. Bench findings to fix first (milestone 20)
+Defects found while testing with real serial hardware go here, one row each, in the C1 format (defect, where, required behaviour), and each gets a regression test. Rows can be added until milestone 20 starts. With no rows, milestone 20 covers only the serial and CI items below.
+
+| # | Defect | Where | Required behaviour |
+|---|---|---|---|
+| — | None reported yet | | |
+
+### D2. Design rules for the new links
+- Every link implements `Transport`. **Message-based links** (MQTT, CAN with ISO-TP, CAN raw) return exactly one message per `read`, so `framing.type = "none"` already treats each read as one frame. **Stream links** (RTT, BLE) return bytes and use the normal framers.
+- A new trait method `fn take_text(&mut self) -> Vec<String>` (default: empty) lets a link deliver text lines from a side channel. The session sends them to the text console and the recording, exactly like text passthrough. RTT uses it for its printf channel.
+- A new trait method `fn message_based(&self) -> bool` (default: false). `protobench check` warns when a message-based link has a framing other than `none`, and when a stream link has `none`.
+- No tokio in `pb-core` by default (B4). The one exception is BLE: `btleplug` is async-only, so the BLE transport runs a current-thread runtime inside its own I/O thread, behind the off-by-default `ble` feature. The rest of the code sees only the blocking `Transport`.
+- Every link reconnects like serial does (backoff, `Reconnecting` state, pending requests failed on loss) and has its fields in the GUI profile editor, in `check` and in `CONFIG_REFERENCE.md`.
+
+### D2b. Multiple devices
+Use case: the board under test plus other devices with their own firmware and `.proto`, such as a reference sensor or a second board, all connected at once, plotted on one time axis, and driven by one sequence that sends to one device and checks another.
+
+- **Each device stays its own project.** A project lists extra devices, each pointing to another project folder, so every firmware repo keeps its own `project.toml`, schema, framing, codec, commands, telemetry and simulator:
+  ```toml
+  [[devices]]
+  name = "ref"                     # identifier: letters, digits, _
+  project = "../ref-sensor"        # path relative to this project
+  profile = "usb"                  # optional; that project's default otherwise
+  ```
+  The project's own device is `main`. A project without `[[devices]]` behaves exactly as before. Included projects are one level deep: a device project that lists its own `[[devices]]` is an error. Up to 8 devices.
+- **One session per device.** Each has its own transport, I/O thread, framer, codec, correlator, link statistics and reconnect logic, and its own connection state. All sessions share one clock, so every sample sits on the same host time axis. A device-timestamped channel keeps its device spacing and is anchored to host time per device, as it is today.
+- **Channel names:** `main` channels keep their plain names (existing layouts, sequences and derived expressions keep working); other devices' channels are `<device>.<channel>` (`ref.vout`). The main project's derived channels may use any device's channels (`err_mv = vout - ref.vout`). If the expression engine cannot take a `.` in an identifier, map it internally; the user-facing name stays `ref.vout`.
+- **Commands and messages** belong to a device. Sequence steps `send`, `expect`, `wait` (for a message) and `capture` take `device = "ref"` (default `main`); `capture` channels and assertions use the prefixed names. Rhai: `send`, `send_msg` and `last`/`stats` accept a `"ref:command"` / prefixed-channel form, or a `device("ref")` handle with the same methods. A run fails at the start, naming the device, when a step needs a device that is not configured or not connected.
+- **Recording:** one recording holds every device. Each record carries a device index, and the header lists the devices with their schemas. Older single-device recordings still open as device `main`. CSV and Parquet columns use the prefixed names. MCAP and Foxglove topics for other devices are `/<device>/rx/...`, `/<device>/tx/...` and `/<device>/text`, while `main` keeps the current topics.
+- **CLI:** `connect`, `monitor` and `run` start every device; `--only main` skips the others. `send` connects only its target (`--device ref`, default `main`). `--profile ref=usb2` and `--port ref=COM7` choose per device (a bare `--profile`/`--port` still means `main`).
+- **GUI:** the status bar shows one connection indicator per device (click: connect/disconnect that device), and **Connection ▸ Connect all**. The command bar groups buttons by device. The message composer, raw console, text console, inspector, link statistics and schema browser have a device selector (the text and raw consoles can also show all devices, tagged). Plots, readouts and tables take any device's channels.
+- **check** validates every device project as well as the device list (unknown path, duplicate or invalid name, nested devices) and resolves `device = …` and prefixed channels in sequences, layouts and derived expressions.
+
+### D3. New features
+| Feature | Benefit | Tag |
+|---|---|---|
+| Multiple devices per project (D2b): `[[devices]]`, one session per device, prefixed channels, `device = …` in sequence steps, per-device CLI options and GUI indicators, multi-device recordings and exports | Test a board against a reference device, or two boards that talk to each other, from one place | Round 4 |
+| Demo: `examples/demo-reference/` (a second project with its own small `.proto`, e.g. `ref.Reading { float vout_mv = 1; }`, and its own simulator that tracks the demo sensor's output), listed as device `ref` in `demo-sensor`, and `sequences/compare.toml` that sets the bias on `main`, captures `vout` and `ref.vout`, and checks that a derived `err_mv` stays within limits | A working example and the end-to-end test for multiple devices | Round 4 |
+| Serial: `usb_serial = "…"` on a profile (with `port = "auto"`) matches the USB serial number. `port = "auto"` fails with "N ports match 0483:5740, set usb_serial" when more than one port matches, instead of picking the first. `list-ports` and the GUI port picker show serial numbers | Two identical boards on one bench always open the right port | Round 4 |
+| CI: `.github/workflows/ci.yml` runs fmt, clippy (`-D warnings`, default and no-default features), tests on Linux, Windows and macOS, the headless GUI smoke test on Linux, and the Python tests; on a `v*` tag it builds release binaries for the three platforms and attaches them to a GitHub release | Every push is checked; releases need no local build | Round 4 |
+| MQTT 3.1.1 transport (`transport = "mqtt"`): `broker = "host:port"`, `client_id`, `username`/`password`, `tls` (rustls with the OS root store), `keep_alive_s`, `subscribe = ["dev/1/up"]` (wildcards allowed), `publish = "dev/1/down"`, `qos` 0 or 1. One PUBLISH payload = one frame. A small in-house client on a blocking socket (no tokio) | Devices behind Wi-Fi/cellular that talk through a broker | Round 4 |
+| `protobench sim --mqtt <broker>` runs the simulator as an MQTT device; `pb-sim` gains `MiniBroker`, an in-process QoS 0/1 broker for tests | Test MQTT end to end without installing a broker | Round 4 |
+| CAN transport (`transport = "can"`): backends `slcan` (Lawicel ASCII adapters such as CANable or USBtin, over a serial port; works on Windows, Linux and macOS) and `socketcan` (Linux only). Options: `bitrate`, `tx_id`, `rx_id`, `extended_id`, `fd` (CAN FD, 64-byte frames), `isotp` (default true) | CAN-only devices, through a cheap USB adapter | Round 4 |
+| ISO-TP (ISO 15765-2) in `pb-core`: single/first/consecutive/flow-control frames, block size and STmin both ways, messages up to 4095 bytes (classic CAN) or 4 GiB (FD escape), optional padding byte, N_Bs/N_Cr timeouts. With `isotp = false` each CAN frame's data is one message | Protobuf messages longer than 8 bytes over CAN | Round 4 |
+| `protobench sim --can-slcan <port>` runs the simulator behind an emulated slcan adapter, so CAN can be tested end to end over a loopback or a virtual serial pair | Test CAN without an adapter | Round 4 |
+| SEGGER RTT transport (`transport = "rtt"`) through `probe-rs` (J-Link, ST-Link, CMSIS-DAP): `chip`, `probe` (VID:PID or serial number, optional when one probe is attached), `rtt_up`/`rtt_down` data channels, `rtt_text_channel` (an up channel shown in the text console, usually 0), `attach` (default true: no reset), `elf` (optional, to find `_SEGGER_RTT` instead of scanning RAM). Behind the `rtt` cargo feature, on by default in `pb-cli` and `pb-gui` | Talk to a board through the debug probe already on the desk; no UART needed | Round 4 |
+| `protobench list-probes` (and the GUI port picker for RTT profiles) lists attached debug probes | Pick the right probe | Round 4 |
+| Python bindings: new crate `pb-py` (PyO3, `abi3-py39`, built with maturin) giving a `protobench` module: `Project(path)`, `project.connect(profile=None, port=None)` returning a `Session` (also a context manager), `send(command, **fields)` and `send_msg(type, dict)` returning `{status, response, latency_ms}`, `wait(type, timeout_s)`, `last(channel)`, `stats(channel)`, `samples(channel, since_s=None)` returning `(times, values)`, `messages(timeout_s)` iterating decoded messages, `run_sequence(name, vars={})` returning the JSON report as a dict, `decode(file)`, `export_csv(...)`, `export_parquet(...)`. `connect` starts every device; the methods target `main`, and `session.device("ref")` returns the same API for another device. Blocking calls release the GIL | Drive devices from pytest, notebooks and existing Python test rigs | Round 4 |
+| BLE GATT transport (`transport = "ble"`) through `btleplug`: device by `ble_name` or `ble_address`, `service`/`rx_char`/`tx_char` UUIDs (default: Nordic UART Service), writes chunked to the negotiated MTU, notifications read as a byte stream. `protobench ble-scan` lists nearby devices. Behind the off-by-default `ble` feature | Wireless sensors that expose a UART-style service | Round 4 |
+
+Not in Round 4 (still [LATER]): PCAN-Basic and Kvaser CAN backends (vendor DLLs), MQTT 5, mapping MQTT topics to message types, a J-Link native SDK backend, a Python async API, publishing wheels to PyPI.
+
+### D3a. Decisions to record in DECISIONS.md (continue from #65)
+- Why each extra device is a separate project referenced from `[[devices]]` rather than a section inside one `project.toml`; why `main` channels stay unprefixed; why nesting is one level.
+- The multi-device recording format and how old recordings are read.
+- Why the MQTT client is written in-house (the maintained Rust clients are tokio-based; B4 forbids an async runtime) and why QoS 2 is left out.
+- Why slcan comes first for CAN (works on all three OSes over the existing serial code and is testable here) and why socketcan cannot be tested in this environment (the WSL2 kernel has no `vcan`).
+- Why BLE is the one tokio exception and how it is confined.
+- Why RTT uses `probe-rs` rather than J-Link's telnet port. Also document the telnet alternative: a `tcp_client` profile to port 19021 (J-Link) or an OpenOCD `rtt server` works today, with the J-Link banner going to the text console when text passthrough is on.
+- Why `pb-py` is not in the workspace's `default-members` (plain `cargo build` must not need Python).
+
+### D4. Technology additions
+- `probe-rs` (feature `rtt`), `socketcan` (Linux only, `cfg(target_os = "linux")`), `rustls` + `rustls-native-certs` (MQTT TLS), `pyo3` (needs a version that supports Python 3.14, the local interpreter), `btleplug` + a current-thread `tokio` runtime (feature `ble` only). Pin each to the newest release that builds on Rust 1.95, and note any build-time system dependency (BLE on Linux needs `dbus` and `pkg-config`) in the README.
+- `actionlint` for checking the workflow locally (`nix shell nixpkgs#actionlint`).
+
+### D5. Milestones (follow in order; commit after each)
+20. **Bench fixes and serial additions:** every D1 row with its regression test; `usb_serial` and the ambiguous-match error (tested with a fake port list); serial numbers in `list-ports` and the GUI; the CI workflow, clean under `actionlint`.
+21. **Link groundwork:** `take_text` and `message_based` on `Transport`; the session handles text lines and the framing warnings; `check` validates per-transport required fields; the GUI profile editor shows the fields for each transport kind. Tests: a mock link delivering side-channel text, and `check` findings for a bad profile of each kind.
+22. **Multiple devices, core and CLI:** `[[devices]]` config and validation, one session per device on a shared clock, prefixed channels and cross-device derived channels, `device = …` in sequence steps and Rhai, multi-device recording (with old recordings still readable), CSV/Parquet/MCAP/Foxglove naming, the CLI options, `check`, the `demo-reference` project and `compare.toml`. Before changing the recording format, commit a short recording made by the current build as a test fixture. Tests: config errors (bad path, duplicate name, nesting), the compare sequence passing against both simulators, a run failing at the start when `ref` is missing, a recording round-trip with two devices, and the fixture still opening and exporting.
+23. **Multiple devices, GUI:** per-device status indicators and Connect all, device selectors in the panels, command bar grouping, plots mixing devices. The GUI smoke test connects both demo simulators, plots `vout` and `ref.vout` together, runs `compare` and exports CSV.
+24. **MQTT:** client, transport, `MiniBroker`, `sim --mqtt`, GUI fields. Tests: packet encode/decode round-trips, keep-alive, QoS 1 redelivery after reconnect, the smoke sequence over `MiniBroker` against the simulator, and an `#[ignore]` test against a real `mosquitto` (`nix shell nixpkgs#mosquitto`).
+25. **CAN:** ISO-TP, the slcan and socketcan backends, `sim --can-slcan`, GUI fields. Tests: an ISO-TP property test (random lengths 0–4095, classic and FD, random block size and STmin, both directions), slcan parse/format tests, the smoke sequence over emulated slcan with ISO-TP against the simulator, and an `#[ignore]` socketcan test for machines with `vcan`.
+26. **SEGGER RTT:** the transport behind a small `RttTarget` trait so it can be tested with a mock; up/down/text channel routing; reconnect when the probe disappears; `list-probes`. Tests: mock-target routing and reconnect; `list-probes` exits 0 with no probe attached.
+27. **Python bindings:** `pb-py`, a demo script `examples/demo-sensor/python/smoke.py`, and a cargo integration test that builds the module and runs `crates/pb-py/tests/test_protobench.py` with the local `python3` against the simulators (connect, send, wait, stats, samples, `device("ref")`, run_sequence, decode).
+28. **BLE GATT** behind `ble`: transport, MTU chunking, `ble-scan`, GUI fields. Tests: chunking and UUID config unit tests; `cargo build -p pb-cli --features ble` succeeds.
+29. **Documentation and acceptance pass:** `README.md`, `USER_GUIDE.md` (a multiple-devices section, and one section per link with wiring and a minimal firmware note), `CONFIG_REFERENCE.md`, `FIRMWARE_INTEGRATION.md` (ISO-TP IDs, RTT buffer setup, NUS UUIDs), `DECISIONS.md`; run every acceptance criterion.
+
+### D6. Bench checklist (manual, run by the user on real hardware, not required to finish)
+1. Two identical USB-serial boards: `usb_serial` opens the right one; unplugging and replugging reconnects to the same board.
+2. RTT: the smoke sequence on a real MCU through a J-Link or ST-Link, with printf on channel 0 appearing in the text console.
+3. CAN: the smoke sequence through a CANable (slcan firmware) on Windows and Linux; on Linux, the same through a SocketCAN adapter.
+4. MQTT: the smoke sequence through Mosquitto with TLS and a password.
+5. BLE: connect to an NUS device, stream telemetry for 10 minutes, survive a power cycle of the device.
+6. Python: `smoke.py` against the real board.
+7. Multiple devices: your board plus a second real device (different firmware) connected at once; both plotted together for 10 minutes; unplugging one leaves the other running and the unplugged one reconnects; a recording of both opens and exports.
+
+### D7. Acceptance criteria — all must hold before you finish
+1. Every C5 criterion still holds. `cargo clippy --workspace --all-targets -- -D warnings` is clean with default features, with `-p pb-core --no-default-features`, and with `--features ble` (inside `nix shell nixpkgs#dbus nixpkgs#pkg-config` on this machine).
+2. Every D1 defect has a regression test, and all tests pass (ignored hardware and broker tests excepted).
+3. `protobench run --project examples/demo-sensor --sequence compare --profile sim --profile ref=sim` exits 0. Every existing single-device test, sequence and layout passes unchanged, and a round-3 recording still opens and exports.
+4. `port = "auto"` with two matching ports fails with a message that names both and suggests `usb_serial`.
+5. The smoke sequence passes against the simulator over MQTT (`MiniBroker`), over CAN (emulated slcan with ISO-TP) and from Python. The ignored `mosquitto` test passes when run with `--ignored` inside `nix shell nixpkgs#mosquitto`.
+6. The ISO-TP property test and the RTT mock tests pass. `protobench list-probes` exits 0 on a machine with no probe.
+7. `protobench check` reports a missing required field for each new transport kind, the framing mismatch warning from D2, and the D2b device-list errors; it exits 0 on the demo with `ref` included.
+8. `actionlint` reports nothing for `.github/workflows/ci.yml`.
+9. `protobench-gui --smoke-test` passes headless, including the two-device steps from milestone 23 and opening the profile editor for an MQTT and a CAN profile.
+10. The documentation describes the round-4 behaviour, and `DECISIONS.md` records the D3a decisions.

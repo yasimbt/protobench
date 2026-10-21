@@ -10,17 +10,16 @@ use crossbeam_channel::{Receiver, Sender};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 
-use pb_core::clock::SystemClock;
+use pb_core::bench::Bench;
 use pb_core::codec::DecodedMessage;
 use pb_core::commands::{build_command, CommandHistory, HistoryEntry, SendRequest};
-use pb_core::config::{CommandConfig, ConnectionProfile};
+use pb_core::config::{CommandConfig, ConnectionProfile, ProjectConfig, MAIN_DEVICE};
 use pb_core::diag::Diagnostic;
 use pb_core::project::Project;
-use pb_core::recorder::{export_csv, recording_path, CsvMode, SessionWriter};
+use pb_core::recorder::{export_csv, recording_path, CsvMode};
 use pb_core::sequence::{OperatorInput, OperatorPrompt};
-use pb_core::session::{
-    BadFrame, ConnState, Direction, RequestOutcome, Session, SessionEvent, SessionParams,
-};
+use pb_core::session::{BadFrame, ConnState, Direction, RequestOutcome, Session, SessionEvent};
+use pb_core::telemetry::TelemetryStore;
 
 /// Settings (saved in the app's storage, not per project).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -76,6 +75,8 @@ pub enum Badge {
 pub enum Dialog {
     /// Edit prompt fields before sending.
     Prompt {
+        /// Device the command belongs to.
+        device: String,
         /// Command name.
         command: String,
         /// (field path, editable text) pairs.
@@ -83,6 +84,8 @@ pub enum Dialog {
     },
     /// Confirm a dangerous command.
     Confirm {
+        /// Device the command belongs to.
+        device: String,
         /// Command name.
         command: String,
         /// Overrides collected by a prompt.
@@ -139,6 +142,8 @@ pub enum ClickOutcome {
 pub struct LogEntry {
     /// Running number.
     pub n: u64,
+    /// Device it came from or went to.
+    pub device: Arc<str>,
     /// Direction.
     pub dir: Direction,
     /// Message.
@@ -148,6 +153,8 @@ pub struct LogEntry {
 /// A text-console line.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextEntry {
+    /// Device it came from.
+    pub device: Arc<str>,
     /// Host seconds.
     pub t: f64,
     /// The line.
@@ -197,6 +204,8 @@ pub fn detect_level(line: &str) -> Level {
 /// Raw console chunk.
 #[derive(Debug, Clone)]
 pub struct RawEntry {
+    /// Device it came from or went to.
+    pub device: Arc<str>,
     /// Host seconds.
     pub t: f64,
     /// Direction.
@@ -289,14 +298,20 @@ pub struct AppState {
     pub project: Option<Project>,
     /// Errors and warnings (project plus runtime).
     pub diagnostics: Vec<Diagnostic>,
-    /// Live session.
+    /// The running devices: one session each, sharing a clock and a
+    /// telemetry store.
+    pub bench: Bench,
+    /// Session of the project's own device (`main`), while it runs.
     pub session: Option<Arc<Session>>,
-    events: Option<Receiver<SessionEvent>>,
-    /// Selected connection profile.
+    events: Vec<(Arc<str>, Receiver<SessionEvent>)>,
+    /// Selected connection profile of `main`.
     pub profile: Option<String>,
-    /// Port override for the selected profile (serial port or host:port).
+    /// Port override for `main`'s profile (serial port or host:port).
     pub port_override: String,
-    /// Badges by command name.
+    /// Profiles chosen for other devices (default: their `[[devices]]`
+    /// profile).
+    pub device_profiles: HashMap<String, String>,
+    /// Badges by command: the name for `main`, `device:name` for others.
     pub badges: HashMap<String, Badge>,
     requests: HashMap<u64, String>,
     /// Sent commands.
@@ -326,8 +341,10 @@ pub struct AppState {
     pub selected: Option<u64>,
     /// Field path selected in the inspector tree.
     pub selected_field: Option<Vec<String>>,
-    /// Last connection state seen.
+    /// Last connection state of `main`.
     pub conn_state: ConnState,
+    /// Last connection state of every device that has run.
+    pub device_states: std::collections::BTreeMap<String, ConnState>,
     /// Warning about changed field numbers after a proto reload.
     pub proto_diff: Option<String>,
     watcher: Option<Watcher>,
@@ -355,10 +372,12 @@ impl AppState {
         Self {
             project: None,
             diagnostics: Vec::new(),
+            bench: Bench::new(settings.capacity),
             session: None,
-            events: None,
+            events: Vec::new(),
             profile: None,
             port_override: String::new(),
+            device_profiles: HashMap::new(),
             badges: HashMap::new(),
             requests: HashMap::new(),
             history: CommandHistory::default(),
@@ -376,6 +395,7 @@ impl AppState {
             selected: None,
             selected_field: None,
             conn_state: ConnState::Disconnected,
+            device_states: Default::default(),
             proto_diff: None,
             watcher: None,
             jobs_tx,
@@ -410,6 +430,8 @@ impl AppState {
         let p = Project::open(dir);
         self.diagnostics = p.diagnostics.clone();
         self.profile = p.config.default_profile().map(|x| x.name.clone());
+        self.device_profiles.clear();
+        self.device_states.clear();
         self.watcher = Some(Watcher::new(&p));
         let canon = std::fs::canonicalize(&p.dir).unwrap_or_else(|_| p.dir.clone());
         self.recent.retain(|r| r != &canon);
@@ -436,8 +458,15 @@ impl AppState {
         let dir = old.dir.clone();
         let old_schema = old.schema.clone();
         let profile = self.profile.clone();
-        let was_connected = self.session.is_some();
+        let device_profiles = self.device_profiles.clone();
+        let running: Vec<String> = self
+            .bench
+            .devices()
+            .iter()
+            .map(|d| d.name.clone())
+            .collect();
         self.open_project(&dir);
+        self.device_profiles = device_profiles;
         if let (Some(a), Some(b)) = (
             old_schema,
             self.project.as_ref().and_then(|p| p.schema.clone()),
@@ -451,9 +480,9 @@ impl AppState {
         if profile.is_some() {
             self.profile = profile;
         }
-        if was_connected {
-            if let Some(p) = self.profile.clone() {
-                let _ = self.connect(&p);
+        for d in running {
+            if let Err(e) = self.connect_device(&d) {
+                self.notify(format!("reconnect {d}: {e}"));
             }
         }
     }
@@ -497,65 +526,232 @@ impl AppState {
 
     // ---------- connection ----------
 
-    /// Connects with a profile. The I/O happens on the session thread.
+    /// Connects `main` with a profile (other devices keep running).
     pub fn connect(&mut self, profile: &str) -> Result<(), String> {
-        self.disconnect();
+        self.profile = Some(profile.to_string());
+        self.connect_device(MAIN_DEVICE)
+    }
+
+    /// Connects every device of the project: `main` with the selected
+    /// profile, the others with theirs.
+    pub fn connect_all(&mut self) -> Result<(), String> {
+        let names: Vec<String> = self
+            .project
+            .as_ref()
+            .ok_or("no project open")?
+            .all_devices()
+            .iter()
+            .map(|d| d.name.to_string())
+            .collect();
+        let mut errors = Vec::new();
+        for n in names {
+            if let Err(e) = self.connect_device(&n) {
+                errors.push(format!("{n}: {e}"));
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
+    }
+
+    /// The profile a device connects with.
+    pub fn device_profile_name(&self, device: &str) -> Option<String> {
+        if device == MAIN_DEVICE {
+            return self.profile.clone();
+        }
+        let p = self.project.as_ref()?;
+        self.device_profiles.get(device).cloned().or_else(|| {
+            p.device_profile(device, None)
+                .ok()
+                .map(|prof| prof.name.clone())
+        })
+    }
+
+    /// Connects (or reconnects) one device. The I/O happens on its session
+    /// thread.
+    pub fn connect_device(&mut self, device: &str) -> Result<(), String> {
         let p = self.project.as_ref().ok_or("no project open")?;
         if p.has_errors() {
             return Err("fix the project errors before connecting".into());
         }
-        let prof = p
-            .config
-            .profile(profile)
-            .ok_or_else(|| format!("no profile `{profile}`"))?
-            .clone();
-        let sim = if prof.transport == pb_core::config::TransportKind::Sim {
-            Some(pb_sim::sim_factory(p).map_err(|e| e.to_string())?)
-        } else {
-            None
-        };
-        let port =
-            (!self.port_override.trim().is_empty()).then(|| self.port_override.trim().to_string());
-        let connector = pb_core::transport::connector(&prof, &p.dir, &p.config.framing, sim, port)
+        let profile = self.device_profile_name(device);
+        let port = (device == MAIN_DEVICE && !self.port_override.trim().is_empty())
+            .then(|| self.port_override.trim().to_string());
+        if self.bench.is_empty() {
+            // Nothing runs: start a fresh clock and store.
+            self.bench = Bench::new(self.settings.capacity);
+        }
+        self.bench.telemetry().set_capacity(self.settings.capacity);
+        self.drop_device(device);
+        let p = self.project.as_ref().ok_or("no project open")?;
+        let d = self
+            .bench
+            .start(
+                p,
+                device,
+                profile.as_deref(),
+                port,
+                &|dp: &Project| pb_sim::sim_factory(dp),
+                |_| {},
+            )
             .map_err(|e| e.to_string())?;
-        let mut params = SessionParams::new(p, &prof).map_err(|e| e.to_string())?;
-        params.capacity = self.settings.capacity;
-        let session =
-            Session::start(params, connector, SystemClock::shared()).map_err(|e| e.to_string())?;
-        self.events = Some(session.subscribe());
-        self.session = Some(Arc::new(session));
-        self.profile = Some(profile.to_string());
-        self.badges.clear();
-        self.notify(format!("connecting: {}", prof.endpoint()));
+        let session = d.session.clone();
+        let endpoint = d.profile.endpoint();
+        let name: Arc<str> = Arc::from(device);
+        self.events.push((name, session.subscribe()));
+        self.device_states
+            .insert(device.to_string(), ConnState::Connecting);
+        if device == MAIN_DEVICE {
+            self.session = Some(session.clone());
+            self.conn_state = ConnState::Connecting;
+            if let Some(pr) = profile {
+                self.profile = Some(pr);
+            }
+        }
+        self.notify(if device == MAIN_DEVICE {
+            format!("connecting: {endpoint}")
+        } else {
+            format!("connecting {device}: {endpoint}")
+        });
         if self.foxglove_enabled {
-            if let Err(e) = self.start_foxglove() {
-                self.notify(format!("Foxglove server: {e}"));
+            if self.foxglove.is_none() {
+                if let Err(e) = self.start_foxglove() {
+                    self.notify(format!("Foxglove server: {e}"));
+                }
+            } else if let Some(f) = &self.foxglove {
+                f.attach_device(session.subscribe(), session.wall_offset_ns(), device);
             }
         }
         Ok(())
     }
 
+    /// Stops one device's session and forgets its events and badges.
+    fn drop_device(&mut self, device: &str) {
+        let was = self.bench.get(device).is_some();
+        self.bench.stop(device);
+        self.events.retain(|(n, _)| &**n != device);
+        let prefix = format!("{device}:");
+        if device == MAIN_DEVICE {
+            let others: Vec<String> = self
+                .project
+                .as_ref()
+                .map(|p| p.devices.iter().map(|d| format!("{}:", d.name)).collect())
+                .unwrap_or_default();
+            self.badges
+                .retain(|k, _| others.iter().any(|o| k.starts_with(o.as_str())));
+            self.session = None;
+            self.conn_state = ConnState::Disconnected;
+        } else {
+            self.badges.retain(|k, _| !k.starts_with(&prefix));
+        }
+        if was {
+            self.device_states
+                .insert(device.to_string(), ConnState::Disconnected);
+        }
+        if self.bench.is_empty() {
+            self.foxglove = None;
+            self.recording = None;
+            self.requests.clear();
+        }
+    }
+
+    /// Disconnects one device (the others keep running).
+    pub fn disconnect_device(&mut self, device: &str) {
+        if self.bench.get(device).is_some() {
+            self.drop_device(device);
+            self.notify(if device == MAIN_DEVICE {
+                "disconnected".to_string()
+            } else {
+                format!("disconnected {device}")
+            });
+        }
+    }
+
+    /// The session of a running device.
+    pub fn device_session(&self, device: &str) -> Option<Arc<Session>> {
+        self.bench.session(device).cloned()
+    }
+
+    /// The config of a device's project.
+    pub fn device_config(&self, device: &str) -> Option<&ProjectConfig> {
+        self.project
+            .as_ref()?
+            .device(device)
+            .map(|d| &d.project.config)
+    }
+
+    /// Names of the project's devices, `main` first.
+    pub fn device_names(&self) -> Vec<String> {
+        self.project
+            .as_ref()
+            .map(|p| p.all_devices().iter().map(|d| d.name.to_string()).collect())
+            .unwrap_or_else(|| vec![MAIN_DEVICE.to_string()])
+    }
+
+    /// True if the project lists other devices.
+    pub fn has_devices(&self) -> bool {
+        self.project.as_ref().is_some_and(|p| !p.devices.is_empty())
+    }
+
+    /// Last known state of a device.
+    pub fn device_state(&self, device: &str) -> ConnState {
+        self.device_states
+            .get(device)
+            .cloned()
+            .unwrap_or(ConnState::Disconnected)
+    }
+
+    /// True if a device is connected.
+    pub fn device_connected(&self, device: &str) -> bool {
+        self.bench
+            .session(device)
+            .is_some_and(|s| s.state().is_connected())
+    }
+
+    /// The telemetry store shared by every running device.
+    pub fn store(&self) -> Option<Arc<TelemetryStore>> {
+        (!self.bench.is_empty()).then(|| self.bench.telemetry().clone())
+    }
+
+    /// True while any device runs.
+    pub fn running(&self) -> bool {
+        !self.bench.is_empty()
+    }
+
     // ---------- foxglove ----------
 
-    /// Starts the Foxglove server for the current session.
+    /// Starts the Foxglove server with every device of the project (each
+    /// with its own schema) and attaches the running ones.
     fn start_foxglove(&mut self) -> Result<(), String> {
         self.foxglove = None;
-        let s = self.session.as_ref().ok_or("not connected")?;
+        if self.bench.is_empty() {
+            return Err("not connected".into());
+        }
         let p = self.project.as_ref().ok_or("no project open")?;
-        let fds = p
-            .require_schema()
-            .map_err(|e| e.to_string())?
-            .fds_bytes()
-            .to_vec();
-        let server = pb_core::foxglove::FoxgloveServer::start(
+        let mut devices = Vec::new();
+        for d in p.all_devices() {
+            let schema = d.project.require_schema().map_err(|e| e.to_string())?;
+            let codec =
+                pb_core::codec::Codec::new(&d.project.config, &schema, pb_core::codec::Role::Host)
+                    .map_err(|e| e.to_string())?;
+            devices.push(pb_core::foxglove::FoxgloveDevice {
+                name: d.name.to_string(),
+                fds: schema.fds_bytes().to_vec(),
+                topics: pb_core::topics::known_topics_on(d.name, &codec),
+            });
+        }
+        let server = pb_core::foxglove::FoxgloveServer::start_devices(
             &self.settings.foxglove_bind,
             self.settings.foxglove_port,
             &format!("ProtoBench: {}", p.config.name),
-            &fds,
-            &pb_core::topics::known_topics(s.codec()),
+            &devices,
         )
         .map_err(|e| e.to_string())?;
-        server.attach(s.subscribe(), s.wall_offset_ns());
+        for d in self.bench.devices() {
+            server.attach_device(d.session.subscribe(), d.session.wall_offset_ns(), &d.name);
+        }
         let addr = server.local_addr();
         self.foxglove = Some(server);
         self.notify(format!("Foxglove server on ws://{addr}"));
@@ -563,7 +759,8 @@ impl AppState {
     }
 
     /// Turns the Foxglove server on or off. While on, it follows the
-    /// connection: it starts with each session and stops on disconnect.
+    /// connection: it starts with the first device and stops when the last
+    /// one disconnects.
     pub fn set_foxglove(&mut self, on: bool) -> Result<(), String> {
         self.foxglove_enabled = on;
         if !on {
@@ -572,7 +769,7 @@ impl AppState {
             }
             return Ok(());
         }
-        if self.session.is_some() {
+        if self.running() {
             self.start_foxglove()
         } else {
             Ok(())
@@ -586,19 +783,28 @@ impl AppState {
             .map(|f| (f.local_addr(), f.client_count()))
     }
 
-    /// Disconnects (stops any recording).
+    /// Disconnects every device (stops any recording).
     pub fn disconnect(&mut self) {
         self.stop_recording();
         self.foxglove = None;
-        self.events = None;
-        if self.session.take().is_some() {
+        let names: Vec<String> = self
+            .bench
+            .devices()
+            .iter()
+            .map(|d| d.name.clone())
+            .collect();
+        let any = !names.is_empty();
+        for n in names {
+            self.drop_device(&n);
+        }
+        if any {
             self.notify("disconnected");
         }
         self.conn_state = ConnState::Disconnected;
         self.requests.clear();
     }
 
-    /// True if connected.
+    /// True if `main` is connected.
     pub fn connected(&self) -> bool {
         self.session
             .as_ref()
@@ -607,13 +813,28 @@ impl AppState {
 
     // ---------- commands ----------
 
-    fn command(&self, name: &str) -> Option<CommandConfig> {
-        self.project.as_ref()?.config.command(name).cloned()
+    fn command(&self, device: &str, name: &str) -> Option<CommandConfig> {
+        self.device_config(device)?.command(name).cloned()
     }
 
-    /// Handles a click on a command button.
+    /// Badge key of a command: its name for `main`, `device:name` for
+    /// another device.
+    pub fn badge_key(device: &str, name: &str) -> String {
+        if device == MAIN_DEVICE {
+            name.to_string()
+        } else {
+            format!("{device}:{name}")
+        }
+    }
+
+    /// Handles a click on a command button of `main`.
     pub fn click_command(&mut self, name: &str) -> ClickOutcome {
-        let Some(cmd) = self.command(name) else {
+        self.click_command_on(MAIN_DEVICE, name)
+    }
+
+    /// Handles a click on a command button of `device`.
+    pub fn click_command_on(&mut self, device: &str, name: &str) -> ClickOutcome {
+        let Some(cmd) = self.command(device, name) else {
             return ClickOutcome::Failed(format!("no command `{name}`"));
         };
         if !cmd.prompt.is_empty() {
@@ -632,6 +853,7 @@ impl AppState {
                 })
                 .collect();
             self.dialog = Some(Dialog::Prompt {
+                device: device.to_string(),
                 command: name.to_string(),
                 fields,
             });
@@ -639,34 +861,48 @@ impl AppState {
         }
         if cmd.dangerous {
             self.dialog = Some(Dialog::Confirm {
+                device: device.to_string(),
                 command: name.to_string(),
                 overrides: Vec::new(),
             });
             return ClickOutcome::Confirm;
         }
-        self.send_command(name, Vec::new())
+        self.send_command_on(device, name, Vec::new())
     }
 
     /// OK in the prompt dialog.
     pub fn submit_prompt(&mut self) -> ClickOutcome {
-        let Some(Dialog::Prompt { command, fields }) = self.dialog.take() else {
+        let Some(Dialog::Prompt {
+            device,
+            command,
+            fields,
+        }) = self.dialog.take()
+        else {
             return ClickOutcome::Failed("no prompt open".into());
         };
         let overrides: Vec<(String, Json)> = fields
             .iter()
             .map(|(k, v)| (k.clone(), pb_core::commands::parse_value(v.trim())))
             .collect();
-        if self.command(&command).is_some_and(|c| c.dangerous) {
-            self.dialog = Some(Dialog::Confirm { command, overrides });
+        if self.command(&device, &command).is_some_and(|c| c.dangerous) {
+            self.dialog = Some(Dialog::Confirm {
+                device,
+                command,
+                overrides,
+            });
             return ClickOutcome::Confirm;
         }
-        self.send_command(&command, overrides)
+        self.send_command_on(&device, &command, overrides)
     }
 
     /// Yes in the confirmation dialog.
     pub fn confirm(&mut self) -> ClickOutcome {
         match self.dialog.take() {
-            Some(Dialog::Confirm { command, overrides }) => self.send_command(&command, overrides),
+            Some(Dialog::Confirm {
+                device,
+                command,
+                overrides,
+            }) => self.send_command_on(&device, &command, overrides),
             other => {
                 self.dialog = other;
                 ClickOutcome::Failed("no confirmation pending".into())
@@ -733,48 +969,55 @@ impl AppState {
         self.dialog = None;
     }
 
-    /// Builds the request for a command.
-    pub fn build_request(
+    /// Builds the request for a command of `device`.
+    pub fn build_request_on(
         &self,
+        device: &str,
         name: &str,
         overrides: &[(String, Json)],
     ) -> Result<SendRequest, String> {
-        let p = self.project.as_ref().ok_or("no project")?;
-        let s = self.session.as_ref().ok_or("not connected")?;
-        let cmd = p
-            .config
+        let cfg = self.device_config(device).ok_or("no project")?;
+        let s = self.device_session(device).ok_or("not connected")?;
+        let cmd = cfg
             .command(name)
             .ok_or_else(|| format!("no command `{name}`"))?;
-        build_command(&p.config, s.codec(), cmd, overrides, &Default::default())
+        build_command(cfg, s.codec(), cmd, overrides, &Default::default())
             .map_err(|e| e.to_string())
     }
 
-    /// Sends a command (no dialogs).
-    pub fn send_command(&mut self, name: &str, overrides: Vec<(String, Json)>) -> ClickOutcome {
-        let req = match self.build_request(name, &overrides) {
+    /// Sends a command of `device` (no dialogs).
+    pub fn send_command_on(
+        &mut self,
+        device: &str,
+        name: &str,
+        overrides: Vec<(String, Json)>,
+    ) -> ClickOutcome {
+        let req = match self.build_request_on(device, name, &overrides) {
             Ok(r) => r,
             Err(e) => {
                 self.badges
-                    .insert(name.to_string(), Badge::Error(e.clone()));
+                    .insert(Self::badge_key(device, name), Badge::Error(e.clone()));
                 return ClickOutcome::Failed(e);
             }
         };
-        let id = self.send_request(req);
+        let id = self.send_request_on(device, req);
         ClickOutcome::Sent(id)
     }
 
-    /// Sends a prepared request, tracking its badge under `req.name`.
-    pub fn send_request(&mut self, req: SendRequest) -> u64 {
-        let Some(s) = self.session.clone() else {
+    /// Sends a prepared request to `device`, tracking its badge under
+    /// [`AppState::badge_key`] of `req.name`.
+    pub fn send_request_on(&mut self, device: &str, req: SendRequest) -> u64 {
+        let key = Self::badge_key(device, &req.name);
+        let Some(s) = self.device_session(device) else {
             self.badges
-                .insert(req.name.clone(), Badge::Error("not connected".into()));
+                .insert(key, Badge::Error("not connected".into()));
             return 0;
         };
-        let name = req.name.clone();
         let inner = inner_json(&req.msg);
         self.history.push(HistoryEntry {
             host_ts_ns: s.now_ns(),
-            name: name.clone(),
+            device: device.to_string(),
+            name: req.name.clone(),
             message: pb_core::codec::set_oneof_member(&req.msg).unwrap_or_else(|| {
                 prost_reflect::ReflectMessage::descriptor(&req.msg)
                     .full_name()
@@ -784,12 +1027,12 @@ impl AppState {
             expect: req.expect.as_ref().map(|e| e.name()),
         });
         let h = s.send(req);
-        self.requests.insert(h.id, name.clone());
-        self.badges.insert(name, Badge::Pending);
+        self.requests.insert(h.id, key.clone());
+        self.badges.insert(key, Badge::Pending);
         h.id
     }
 
-    /// Resends a history entry.
+    /// Resends a history entry to the device it went to.
     pub fn resend(&mut self, index: usize) -> Result<u64, String> {
         let e = self
             .history
@@ -797,10 +1040,10 @@ impl AppState {
             .nth(index)
             .cloned()
             .ok_or("no such entry")?;
-        let p = self.project.as_ref().ok_or("no project")?;
-        let s = self.session.as_ref().ok_or("not connected")?;
+        let cfg = self.device_config(&e.device).ok_or("no project")?;
+        let s = self.device_session(&e.device).ok_or("not connected")?;
         let req = pb_core::commands::build_inline(
-            &p.config,
+            cfg,
             s.codec(),
             &e.message,
             e.payload.clone(),
@@ -811,27 +1054,26 @@ impl AppState {
         .map_err(|e| e.to_string())?;
         let mut req = req;
         req.name = e.name.clone();
-        Ok(self.send_request(req))
+        Ok(self.send_request_on(&e.device, req))
     }
 
-    /// Starts or stops periodic sending of a command.
-    pub fn set_periodic(&mut self, name: &str, on: bool) -> Result<(), String> {
-        let s = self.session.clone().ok_or("not connected")?;
+    /// Starts or stops periodic sending of a command of `device`.
+    pub fn set_periodic_on(&mut self, device: &str, name: &str, on: bool) -> Result<(), String> {
+        let s = self.device_session(device).ok_or("not connected")?;
         if !on {
             s.set_periodic(name, None);
             return Ok(());
         }
-        let cmd = self.command(name).ok_or("no such command")?;
+        let cmd = self.command(device, name).ok_or("no such command")?;
         let period = cmd.periodic_ms.ok_or("command has no periodic_ms")?;
-        let req = self.build_request(name, &[])?;
+        let req = self.build_request_on(device, name, &[])?;
         s.set_periodic(name, Some((req, period)));
         Ok(())
     }
 
-    /// True if a command is sending periodically.
-    pub fn is_periodic(&self, name: &str) -> bool {
-        self.session
-            .as_ref()
+    /// True if a command of `device` is sending periodically.
+    pub fn is_periodic_on(&self, device: &str, name: &str) -> bool {
+        self.device_session(device)
             .is_some_and(|s| s.periodic_keys().iter().any(|k| k == name))
     }
 
@@ -848,26 +1090,34 @@ impl AppState {
                 }
             }
         }
-        let Some(rx) = self.events.clone() else {
-            return;
-        };
+        let receivers = self.events.clone();
         // Bound the work per frame; the rest is picked up next frame.
-        for _ in 0..20_000 {
-            let Ok(ev) = rx.try_recv() else { break };
-            self.handle_event(ev);
+        for (device, rx) in receivers {
+            for _ in 0..20_000 {
+                let Ok(ev) = rx.try_recv() else { break };
+                self.handle_event(&device, ev);
+            }
         }
     }
 
-    fn handle_event(&mut self, ev: SessionEvent) {
+    fn handle_event(&mut self, device: &Arc<str>, ev: SessionEvent) {
         match ev {
             SessionEvent::State(s) => {
-                self.notify(s.label());
-                self.conn_state = s;
+                self.notify(if &**device == MAIN_DEVICE {
+                    s.label()
+                } else {
+                    format!("{device}: {}", s.label())
+                });
+                if &**device == MAIN_DEVICE {
+                    self.conn_state = s.clone();
+                }
+                self.device_states.insert(device.to_string(), s);
             }
             SessionEvent::Message { dir, msg } => {
                 self.msg_counter += 1;
                 self.msg_log.push_back(LogEntry {
                     n: self.msg_counter,
+                    device: device.clone(),
                     dir,
                     msg,
                 });
@@ -877,6 +1127,7 @@ impl AppState {
             }
             SessionEvent::Text { host_ts_ns, line } => {
                 self.text_log.push_back(TextEntry {
+                    device: device.clone(),
                     t: host_ts_ns as f64 / 1e9,
                     level: detect_level(&line),
                     line,
@@ -891,6 +1142,7 @@ impl AppState {
                 bytes,
             } => {
                 self.raw_log.push_back(RawEntry {
+                    device: device.clone(),
                     t: host_ts_ns as f64 / 1e9,
                     dir,
                     bytes,
@@ -900,7 +1152,10 @@ impl AppState {
                 }
             }
             SessionEvent::Request { id, name, outcome } => {
-                let key = self.requests.remove(&id).unwrap_or(name);
+                let key = self
+                    .requests
+                    .remove(&id)
+                    .unwrap_or_else(|| Self::badge_key(device, &name));
                 let badge = match outcome {
                     RequestOutcome::Sent => Badge::Sent,
                     RequestOutcome::Ok { latency_ns, .. } => Badge::Ok {
@@ -926,18 +1181,23 @@ impl AppState {
 
     // ---------- recording ----------
 
-    /// Starts recording to a new file.
+    /// Starts recording every running device (and devices connected
+    /// later) to a new file.
     pub fn start_recording(&mut self) -> Result<PathBuf, String> {
         let p = self.project.as_ref().ok_or("no project")?;
-        let s = self.session.as_ref().ok_or("connect first")?;
+        if !self.running() {
+            return Err("connect first".into());
+        }
         let dir = self
             .settings
             .recordings_dir
             .clone()
             .unwrap_or_else(|| p.recordings_dir());
         let path = recording_path(&dir, &p.config.name);
-        let w = SessionWriter::create(&path, p).map_err(|e| e.to_string())?;
-        s.start_recording(Box::new(w));
+        let p = p.clone();
+        self.bench
+            .start_recording(&path, &p)
+            .map_err(|e| e.to_string())?;
         self.recording = Some(path.clone());
         self.notify(format!("recording to {}", path.display()));
         Ok(path)
@@ -945,21 +1205,27 @@ impl AppState {
 
     /// Stops recording.
     pub fn stop_recording(&mut self) {
-        let Some(s) = &self.session else {
+        if self.bench.recording().is_none() {
             self.recording = None;
             return;
-        };
-        if let Some(mut w) = s.stop_recording() {
-            match w.finish() {
-                Ok(()) => {
-                    if let Some(p) = self.recording.take() {
-                        self.notify(format!("saved {}", p.display()));
-                    }
+        }
+        match self.bench.stop_recording() {
+            Ok(()) => {
+                if let Some(p) = self.recording.take() {
+                    self.notify(format!("saved {}", p.display()));
                 }
-                Err(e) => self.notify(format!("recording error: {e}")),
             }
+            Err(e) => self.notify(format!("recording error: {e}")),
         }
         self.recording = None;
+    }
+
+    /// Seconds since recording started.
+    pub fn recording_elapsed_s(&self) -> Option<f64> {
+        self.bench
+            .recording()
+            .and_then(|_| self.bench.devices().first())
+            .and_then(|d| d.session.recording_elapsed_s())
     }
 
     /// Adds a marker (also written to the recording).
@@ -969,9 +1235,10 @@ impl AppState {
         } else {
             text.trim().to_string()
         };
-        match &self.session {
-            Some(s) => s.add_marker(&text),
-            None => self.markers.push(Marker { t: 0.0, text }),
+        if self.running() {
+            self.bench.add_marker(&text);
+        } else {
+            self.markers.push(Marker { t: 0.0, text });
         }
     }
 
@@ -983,11 +1250,10 @@ impl AppState {
         range: Option<(f64, f64)>,
         mode: CsvMode,
     ) {
-        let Some(s) = &self.session else {
+        let Some(store) = self.store() else {
             self.notify("nothing to export: not connected");
             return;
         };
-        let store = s.telemetry().clone();
         let tx = self.jobs();
         std::thread::spawn(move || {
             let r = export_csv(&store, &channels, range, mode, &path);
@@ -1007,11 +1273,10 @@ impl AppState {
 
     /// Exports channels to Parquet on a background thread.
     pub fn export_parquet(&mut self, path: PathBuf) {
-        let Some(s) = &self.session else {
+        let Some(store) = self.store() else {
             self.notify("nothing to export: not connected");
             return;
         };
-        let store = s.telemetry().clone();
         let tx = self.jobs();
         std::thread::spawn(move || {
             let r = pb_core::recorder::export_parquet(&store, &[], None, &path);
@@ -1037,10 +1302,11 @@ impl AppState {
 
     // ---------- composer ----------
 
-    /// Appends a `[[commands]]` entry to project.toml (formatting preserved)
-    /// and reloads the project.
-    pub fn save_command(
+    /// Appends a `[[commands]]` entry to the project.toml of `device`
+    /// (formatting preserved) and reloads the project.
+    pub fn save_command_on(
         &mut self,
+        device: &str,
         name: &str,
         group: &str,
         message: &str,
@@ -1048,10 +1314,11 @@ impl AppState {
         expect: Option<&str>,
     ) -> Result<(), String> {
         let p = self.project.as_ref().ok_or("no project")?;
-        if p.config.command(name).is_some() {
+        let d = p.device(device).ok_or("no such device")?;
+        if d.project.config.command(name).is_some() {
             return Err(format!("a command named `{name}` already exists"));
         }
-        let path = p.config_path();
+        let path = d.project.config_path();
         let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
         let new = append_command(&text, name, group, message, payload, expect)?;
         std::fs::write(&path, new).map_err(|e| e.to_string())?;

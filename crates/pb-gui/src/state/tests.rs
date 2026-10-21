@@ -92,12 +92,12 @@ fn erase_calibration_asks_for_confirmation() {
 #[test]
 fn periodic_heartbeat_and_resend() {
     let mut s = connected();
-    s.set_periodic("Heartbeat", true).unwrap();
-    assert!(s.is_periodic("Heartbeat"));
+    s.set_periodic_on(MAIN_DEVICE, "Heartbeat", true).unwrap();
+    assert!(s.is_periodic_on(MAIN_DEVICE, "Heartbeat"));
     wait(&mut s, |s| {
         matches!(s.badges.get("Heartbeat"), Some(Badge::Sent))
     });
-    s.set_periodic("Heartbeat", false).unwrap();
+    s.set_periodic_on(MAIN_DEVICE, "Heartbeat", false).unwrap();
     s.click_command("Ping");
     wait(&mut s, |s| {
         matches!(s.badges.get("Ping"), Some(Badge::Ok { .. }))
@@ -311,4 +311,63 @@ fn operator_dialog_validates_and_remembers_values() {
     );
     s.cancel_dialog();
     assert_eq!(rx.try_recv().unwrap(), None);
+}
+
+#[test]
+fn second_device_connects_tags_its_traffic_and_records_with_main() {
+    let mut s = connected();
+    assert!(s.has_devices());
+    assert_eq!(s.device_names(), ["main", "ref"]);
+    assert_eq!(s.device_profile_name("ref").as_deref(), Some("sim"));
+    s.connect_device("ref").unwrap();
+    wait(&mut s, |s| s.device_connected("ref") && s.connected());
+    // Commands of the other device have their own badges.
+    assert!(matches!(
+        s.click_command_on("ref", "Ping"),
+        ClickOutcome::Sent(_)
+    ));
+    wait(&mut s, |s| {
+        matches!(s.badges.get("ref:Ping"), Some(Badge::Ok { .. }))
+    });
+    assert!(!s.badges.contains_key("Ping"));
+    assert_eq!(s.history.iter().last().unwrap().device, "ref");
+    // Its messages are tagged, and its channels share the store.
+    wait(&mut s, |s| {
+        s.msg_log.iter().any(|e| &*e.device == "ref")
+            && s.store()
+                .and_then(|t| t.get("ref.reading.vout_mv"))
+                .is_some_and(|c| c.total() > 10)
+    });
+    // One recording holds both devices.
+    let dir = std::env::temp_dir().join(format!("pb-gui-devs-{}", std::process::id()));
+    s.settings.recordings_dir = Some(dir.clone());
+    s.click_command("Start Stream");
+    let path = s.start_recording().unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    // A device can leave while the recording goes on.
+    s.disconnect_device("ref");
+    assert!(s.connected() && s.device_session("ref").is_none());
+    std::thread::sleep(Duration::from_millis(100));
+    s.stop_recording();
+    let off = pb_core::recorder::OfflineSession::open(&path).unwrap();
+    let per = |d: u8| off.records.iter().filter(|r| r.device == d).count();
+    assert!(per(0) > 50 && per(1) > 5, "{} {}", per(0), per(1));
+    // Connect all brings it back.
+    s.connect_all().unwrap();
+    wait(&mut s, |s| s.device_connected("ref"));
+    // The composer sends to the device it is set to.
+    let mut cs = crate::tools::ComposerState::default();
+    cs.device = Some("ref".into());
+    let codec = (**s.device_session("ref").unwrap().codec()).clone();
+    cs.select(&codec, "ping").unwrap();
+    cs.send(&mut s).unwrap();
+    wait(&mut s, |s| {
+        matches!(
+            s.badges.get("ref:composer: ping"),
+            Some(Badge::Sent | Badge::Ok { .. })
+        )
+    });
+    s.disconnect();
+    assert!(!s.running());
+    let _ = std::fs::remove_dir_all(dir);
 }

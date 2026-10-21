@@ -98,6 +98,15 @@ fn tree(
     }
 }
 
+/// `reading` for `main`, `ref:reading` for another device.
+fn kind_label(e: &crate::state::LogEntry) -> String {
+    if &*e.device == pb_core::config::MAIN_DEVICE {
+        e.msg.kind().to_string()
+    } else {
+        format!("{}:{}", e.device, e.msg.kind())
+    }
+}
+
 fn field_row(ui: &mut egui::Ui, label: &str, value: &str, selected: bool) -> bool {
     ui.horizontal(|ui| {
         let r = ui.selectable_label(selected, RichText::new(label).monospace());
@@ -119,7 +128,7 @@ pub fn table(ui: &mut egui::Ui, state: &mut AppState, cfg: &mut TableCfg, tab_id
                 .hint_text("type"),
         );
     });
-    if state.session.is_none() && state.msg_log.is_empty() {
+    if !state.running() && state.msg_log.is_empty() {
         not_connected(ui);
         return;
     }
@@ -135,7 +144,7 @@ pub fn table(ui: &mut egui::Ui, state: &mut AppState, cfg: &mut TableCfg, tab_id
                 if e.dir != Direction::Rx {
                     continue;
                 }
-                let k = e.msg.kind().to_string();
+                let k = kind_label(e);
                 if seen.contains(&k) || !pass(&k, &e.msg.type_name) {
                     continue;
                 }
@@ -145,7 +154,7 @@ pub fn table(ui: &mut egui::Ui, state: &mut AppState, cfg: &mut TableCfg, tab_id
                     break;
                 }
             }
-            latest.sort_by(|a, b| a.msg.kind().cmp(b.msg.kind()));
+            latest.sort_by_key(kind_label);
             egui::ScrollArea::vertical()
                 .id_salt(("latest", tab_id))
                 .show(ui, |ui| {
@@ -153,13 +162,13 @@ pub fn table(ui: &mut egui::Ui, state: &mut AppState, cfg: &mut TableCfg, tab_id
                         egui::CollapsingHeader::new(
                             RichText::new(format!(
                                 "{}  (#{} at {:.3} s)",
-                                e.msg.kind(),
+                                kind_label(&e),
                                 e.n,
                                 e.msg.host_ts_ns as f64 / 1e9
                             ))
                             .strong(),
                         )
-                        .id_salt(("latest", tab_id, e.msg.kind().to_string()))
+                        .id_salt(("latest", tab_id, kind_label(&e)))
                         .default_open(true)
                         .show(ui, |ui| {
                             let mut path = Vec::new();
@@ -178,7 +187,7 @@ pub fn table(ui: &mut egui::Ui, state: &mut AppState, cfg: &mut TableCfg, tab_id
             let rows: Vec<_> = state
                 .msg_log
                 .iter()
-                .filter(|e| pass(e.msg.kind(), &e.msg.type_name))
+                .filter(|e| pass(&kind_label(e), &e.msg.type_name))
                 .cloned()
                 .collect();
             let row_h = ui.text_style_height(&egui::TextStyle::Monospace) + 4.0;
@@ -213,7 +222,7 @@ pub fn table(ui: &mut egui::Ui, state: &mut AppState, cfg: &mut TableCfg, tab_id
                             }
                             ui.label(dir.monospace());
                             ui.label(
-                                RichText::new(format!("{:<12}", e.msg.kind()))
+                                RichText::new(format!("{:<12}", kind_label(e)))
                                     .monospace()
                                     .strong(),
                             );
@@ -236,25 +245,35 @@ pub fn table(ui: &mut egui::Ui, state: &mut AppState, cfg: &mut TableCfg, tab_id
 
 /// Decoded tree and hex dump of the selected message.
 pub fn inspector(ui: &mut egui::Ui, state: &mut AppState) {
+    let id = ui.id().with("inspector_device");
+    let mut device: Option<String> = ui.data_mut(|d| d.get_temp(id).unwrap_or_default());
     ui.horizontal(|ui| {
+        super::device_picker(ui, state, id, &mut device, true);
         if ui.button("Latest rx").clicked() {
             state.selected = state
                 .msg_log
                 .iter()
                 .rev()
+                .filter(|e| device.as_deref().is_none_or(|d| *e.device == *d))
                 .find(|e| e.dir == Direction::Rx)
                 .map(|e| e.n);
             state.selected_field = None;
         }
         ui.weak("or select a row in a Table (message log).");
     });
+    ui.data_mut(|d| d.insert_temp(id, device));
     let Some(e) = state.selected.and_then(|n| state.logged(n)).cloned() else {
         ui.weak("No message selected.");
         return;
     };
     ui.strong(format!(
-        "#{} {} {} — {} bytes",
+        "#{} {}{} {} — {} bytes",
         e.n,
+        if state.has_devices() {
+            format!("{} ", e.device)
+        } else {
+            String::new()
+        },
         match e.dir {
             Direction::Rx => "rx",
             Direction::Tx => "tx",

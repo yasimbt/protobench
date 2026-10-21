@@ -159,6 +159,9 @@ pub struct TableCfg {
 /// Raw console settings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RawCfg {
+    /// Show only this device (None: all, tagged when there are several).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
     /// Show hex.
     #[serde(default = "yes")]
     pub hex: bool,
@@ -182,6 +185,7 @@ pub struct RawCfg {
 impl Default for RawCfg {
     fn default() -> Self {
         Self {
+            device: None,
             hex: true,
             ascii: true,
             search: String::new(),
@@ -195,6 +199,9 @@ impl Default for RawCfg {
 /// Text console settings.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TextCfg {
+    /// Show only this device (None: all, tagged when there are several).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
     /// Filter (substring, case-insensitive).
     #[serde(default)]
     pub filter: String,
@@ -206,6 +213,7 @@ pub struct TextCfg {
 impl Default for TextCfg {
     fn default() -> Self {
         Self {
+            device: None,
             filter: String::new(),
             autoscroll: true,
         }

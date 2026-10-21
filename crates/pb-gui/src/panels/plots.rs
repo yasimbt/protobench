@@ -14,11 +14,7 @@ use crate::layout::{HistCfg, TimePlotCfg, XyPlotCfg};
 use crate::state::AppState;
 
 fn store_channels(state: &AppState) -> Vec<Arc<Channel>> {
-    state
-        .session
-        .as_ref()
-        .map(|s| s.telemetry().channels())
-        .unwrap_or_default()
+    state.store().map(|s| s.channels()).unwrap_or_default()
 }
 
 fn rgb(c: [u8; 3]) -> Color32 {
@@ -101,7 +97,7 @@ pub fn time_plot(ui: &mut egui::Ui, state: &mut AppState, cfg: &mut TimePlotCfg,
             cfg.rt.cursor_b = None;
         }
     });
-    if state.session.is_none() && cfg.traces.is_empty() {
+    if !state.running() && cfg.traces.is_empty() {
         not_connected(ui);
         return;
     }

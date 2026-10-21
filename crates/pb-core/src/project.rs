@@ -346,6 +346,29 @@ impl Project {
             .parse()
             .map_err(|e| crate::CoreError::Config(format!("{e}")))?;
         doc["name"] = toml_edit::value(new_name);
+        // Device folders stay where they are: rewrite their relative paths
+        // so they still point there from the copy.
+        let me = std::fs::canonicalize(&self.dir).unwrap_or_else(|_| self.dir.clone());
+        let to = std::fs::canonicalize(dest).unwrap_or_else(|_| dest.to_path_buf());
+        if let Some(devs) = doc
+            .get_mut("devices")
+            .and_then(|d| d.as_array_of_tables_mut())
+        {
+            for t in devs.iter_mut() {
+                let Some(rel) = t.get("project").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                let old = self.dir.join(rel);
+                let Ok(target) = std::fs::canonicalize(&old) else {
+                    continue;
+                };
+                if Path::new(rel).is_absolute() || target == me {
+                    continue; // absolute, or this project's own folder (".")
+                }
+                let new = relative_path(&target, &to);
+                t["project"] = toml_edit::value(new.to_string_lossy().replace('\\', "/"));
+            }
+        }
         std::fs::write(&cfg, doc.to_string()).map_err(|e| crate::CoreError::io(&cfg, e))?;
         Ok(dest.to_path_buf())
     }
@@ -370,6 +393,25 @@ fn normalize(p: &Path) -> PathBuf {
             }
             other => out.push(other.as_os_str()),
         }
+    }
+    out
+}
+
+/// `target` relative to `base` (both absolute), or `target` itself when
+/// they share no root (another drive).
+fn relative_path(target: &Path, base: &Path) -> PathBuf {
+    let t: Vec<_> = target.components().collect();
+    let b: Vec<_> = base.components().collect();
+    let common = t.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    if common == 0 {
+        return target.to_path_buf();
+    }
+    let mut out = PathBuf::new();
+    for _ in common..b.len() {
+        out.push("..");
+    }
+    for c in &t[common..] {
+        out.push(c.as_os_str());
     }
     out
 }
@@ -840,5 +882,29 @@ project = "."
         assert_eq!(q.config.name, "Copy");
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dup);
+    }
+
+    #[test]
+    fn duplicate_keeps_device_paths_valid() {
+        let root = std::env::temp_dir().join(format!("pb-proj-dupdev-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        create_project(&root.join("a"), "A").unwrap();
+        create_project(&root.join("meter"), "Meter").unwrap();
+        let f = root.join("a").join(PROJECT_FILE);
+        let mut text = std::fs::read_to_string(&f).unwrap();
+        text.push_str("\n[[devices]]\nname = \"m\"\nproject = \"../meter\"\n\n[[devices]]\nname = \"twin\"\nproject = \".\"\n");
+        std::fs::write(&f, text).unwrap();
+        let p = Project::open(&root.join("a"));
+        assert!(!p.has_errors(), "{:?}", p.diagnostics);
+        let dest = root.join("deeper/copy");
+        std::fs::create_dir_all(root.join("deeper")).unwrap();
+        p.duplicate(&dest, "Copy").unwrap();
+        let q = Project::open(&dest);
+        assert!(!q.has_errors(), "{:?}", q.diagnostics);
+        assert_eq!(q.device("m").unwrap().project.config.name, "Meter");
+        let text = std::fs::read_to_string(dest.join(PROJECT_FILE)).unwrap();
+        assert!(text.contains("project = \"../../meter\""), "{text}");
+        assert!(text.contains("project = \".\""), "{text}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

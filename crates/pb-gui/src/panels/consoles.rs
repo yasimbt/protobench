@@ -4,7 +4,7 @@ use egui::{Color32, RichText};
 
 use pb_core::session::Direction;
 
-use super::{not_connected, BAD, OK, WARN};
+use super::{device_picker, not_connected, picked, BAD, OK, WARN};
 use crate::layout::{RawCfg, TextCfg};
 use crate::state::{AppState, Level, RawEntry};
 
@@ -38,6 +38,7 @@ fn matches_search(e: &RawEntry, needle: &str, needle_hex: &Option<Vec<u8>>) -> b
 /// Hex + ASCII view of raw traffic, with a send box.
 pub fn raw_console(ui: &mut egui::Ui, state: &mut AppState, cfg: &mut RawCfg, tab_id: u64) {
     ui.horizontal_wrapped(|ui| {
+        device_picker(ui, state, ("rawdev", tab_id), &mut cfg.device, true);
         ui.checkbox(&mut cfg.hex, "hex");
         ui.checkbox(&mut cfg.ascii, "ASCII");
         let paused = cfg.paused_at.is_some();
@@ -73,8 +74,11 @@ pub fn raw_console(ui: &mut egui::Ui, state: &mut AppState, cfg: &mut RawCfg, ta
                     "text (\\n for newline)"
                 }),
         );
+        // Raw bytes go to the device shown (main when showing all).
+        let target = state.device_session(picked(&cfg.device));
         let send = ui
-            .add_enabled(state.session.is_some(), egui::Button::new("Send raw"))
+            .add_enabled(target.is_some(), egui::Button::new("Send raw"))
+            .on_hover_text(format!("to {}", picked(&cfg.device)))
             .clicked()
             || (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
         if send {
@@ -87,17 +91,18 @@ pub fn raw_console(ui: &mut egui::Ui, state: &mut AppState, cfg: &mut RawCfg, ta
                     .replace("\\r", "\r")
                     .into_bytes())
             };
-            match (bytes, &state.session) {
+            match (bytes, &target) {
                 (Ok(b), Some(s)) => s.send_raw(b),
                 (Err(e), _) => state.notify(format!("raw send: {e}")),
                 _ => {}
             }
         }
     });
-    if state.session.is_none() && state.raw_log.is_empty() {
+    if !state.running() && state.raw_log.is_empty() {
         not_connected(ui);
         return;
     }
+    let show_device = cfg.device.is_none() && state.has_devices();
     let needle_hex = pb_core::util::parse_hex(&cfg.search).ok();
     let limit = cfg
         .paused_at
@@ -107,6 +112,7 @@ pub fn raw_console(ui: &mut egui::Ui, state: &mut AppState, cfg: &mut RawCfg, ta
         .raw_log
         .iter()
         .take(limit)
+        .filter(|e| cfg.device.as_deref().is_none_or(|d| *e.device == *d))
         .filter(|e| matches_search(e, &cfg.search, &needle_hex))
         .collect();
     let row_h = ui.text_style_height(&egui::TextStyle::Monospace);
@@ -121,6 +127,9 @@ pub fn raw_console(ui: &mut egui::Ui, state: &mut AppState, cfg: &mut RawCfg, ta
                     Direction::Tx => ("TX", TX),
                 };
                 let mut s = format!("{:10.4} {tag} ", e.t);
+                if show_device {
+                    s.push_str(&format!("{:<6} ", e.device));
+                }
                 if cfg.hex {
                     s.push_str(&pb_core::util::hex(&e.bytes));
                     s.push_str("  ");
@@ -136,6 +145,7 @@ pub fn raw_console(ui: &mut egui::Ui, state: &mut AppState, cfg: &mut RawCfg, ta
 /// Firmware log lines with level colours.
 pub fn text_console(ui: &mut egui::Ui, state: &mut AppState, cfg: &mut TextCfg, tab_id: u64) {
     ui.horizontal(|ui| {
+        device_picker(ui, state, ("textdev", tab_id), &mut cfg.device, true);
         ui.label("filter");
         ui.add(egui::TextEdit::singleline(&mut cfg.filter).desired_width(160.0));
         ui.checkbox(&mut cfg.autoscroll, "auto-scroll");
@@ -144,7 +154,7 @@ pub fn text_console(ui: &mut egui::Ui, state: &mut AppState, cfg: &mut TextCfg, 
         }
     });
     if state.text_log.is_empty() {
-        ui.weak(if state.session.is_some() {
+        ui.weak(if state.running() {
             "No text lines yet (text passthrough shows printable lines between frames)."
         } else {
             "Not connected."
@@ -152,9 +162,11 @@ pub fn text_console(ui: &mut egui::Ui, state: &mut AppState, cfg: &mut TextCfg, 
         return;
     }
     let f = cfg.filter.to_lowercase();
+    let show_device = cfg.device.is_none() && state.has_devices();
     let lines: Vec<_> = state
         .text_log
         .iter()
+        .filter(|l| cfg.device.as_deref().is_none_or(|d| *l.device == *d))
         .filter(|l| f.is_empty() || l.line.to_lowercase().contains(&f))
         .collect();
     let row_h = ui.text_style_height(&egui::TextStyle::Monospace);
@@ -171,11 +183,12 @@ pub fn text_console(ui: &mut egui::Ui, state: &mut AppState, cfg: &mut TextCfg, 
                     Level::Debug => Color32::GRAY,
                     Level::Plain => ui.visuals().text_color(),
                 };
-                ui.label(
-                    RichText::new(format!("{:10.3}  {}", l.t, l.line))
-                        .monospace()
-                        .color(col),
-                );
+                let text = if show_device {
+                    format!("{:10.3}  {:<6} {}", l.t, l.device, l.line)
+                } else {
+                    format!("{:10.3}  {}", l.t, l.line)
+                };
+                ui.label(RichText::new(text).monospace().color(col));
             }
         });
 }

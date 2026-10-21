@@ -12,11 +12,7 @@ use crate::layout::{ChannelsCfg, PALETTE};
 use crate::state::AppState;
 
 fn channels(state: &AppState) -> Vec<Arc<Channel>> {
-    state
-        .session
-        .as_ref()
-        .map(|s| s.telemetry().channels())
-        .unwrap_or_default()
+    state.store().map(|s| s.channels()).unwrap_or_default()
 }
 
 fn pick(
@@ -59,7 +55,7 @@ fn channel_menu(ui: &mut egui::Ui, cfg: &mut ChannelsCfg, all: &[Arc<Channel>]) 
 
 /// Numeric tiles with limit colouring.
 pub fn readouts(ui: &mut egui::Ui, state: &mut AppState, cfg: &mut ChannelsCfg) {
-    if state.session.is_none() {
+    if !state.running() {
         not_connected(ui);
         return;
     }
@@ -113,7 +109,7 @@ pub fn readouts(ui: &mut egui::Ui, state: &mut AppState, cfg: &mut ChannelsCfg) 
 
 /// LEDs for enum and bool channels.
 pub fn indicators(ui: &mut egui::Ui, state: &mut AppState, cfg: &mut ChannelsCfg) {
-    if state.session.is_none() {
+    if !state.running() {
         not_connected(ui);
         return;
     }
@@ -179,7 +175,7 @@ pub fn channel_list(
     state: &mut AppState,
     actions: &mut Vec<crate::app::Action>,
 ) {
-    if state.session.is_none() {
+    if !state.running() {
         not_connected(ui);
         return;
     }
@@ -217,14 +213,14 @@ pub fn channel_list(
 
 /// Per-channel statistics table.
 pub fn channel_stats(ui: &mut egui::Ui, state: &mut AppState) {
-    let Some(s) = &state.session else {
+    let Some(store) = state.store() else {
         not_connected(ui);
         return;
     };
     if ui.button("Reset statistics").clicked() {
-        s.telemetry().reset_stats();
+        store.reset_stats();
     }
-    let all = s.telemetry().channels();
+    let all = store.channels();
     egui::ScrollArea::both().show(ui, |ui| {
         egui::Grid::new("chstats")
             .striped(true)
@@ -254,13 +250,19 @@ pub fn channel_stats(ui: &mut egui::Ui, state: &mut AppState) {
 
 /// Link counters, bad frames and latency.
 pub fn link_stats(ui: &mut egui::Ui, state: &mut AppState) {
-    let Some(s) = &state.session else {
+    // The device shown is kept per panel in egui memory.
+    let id = ui.id().with("link_device");
+    let mut device: Option<String> = ui.data_mut(|d| d.get_temp(id).unwrap_or_default());
+    ui.horizontal(|ui| super::device_picker(ui, state, id, &mut device, false));
+    ui.data_mut(|d| d.insert_temp(id, device.clone()));
+    let Some(s) = state.device_session(super::picked(&device)) else {
         not_connected(ui);
         return;
     };
     let st = s.stats();
     let shared = s.shared().clone();
     ui.horizontal(|ui| {
+        ui.weak(s.endpoint());
         if ui.button("Reset counters").clicked() {
             shared.counters.reset();
             shared.bad_frames.clear();

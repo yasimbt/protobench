@@ -1,11 +1,14 @@
 //! `--smoke-test`: drives the real UI code paths against the simulator.
 //!
 //! 1. Headless: renders frames with `egui::Context::run_ui` (no display
-//!    needed) while a script clicks Connect, Start Stream, Set Bias (prompt),
-//!    Erase Calibration (confirm) and sends every composer message, through
-//!    the same `AppState` actions the buttons call, then runs the `smoke`
-//!    sequence and answers its operator dialog. It then checks that the
-//!    plot, readout, indicator and text-console data are there.
+//!    needed) while a script clicks Connect (and the `ref` device's status
+//!    indicator), Start Stream, Set Bias (prompt), Erase Calibration
+//!    (confirm) and sends every composer message, through the same
+//!    `AppState` actions the buttons call, then runs the `smoke` sequence
+//!    and answers its operator dialog, plots the sensor and the reference
+//!    meter together, runs `compare` across both devices and exports their
+//!    channels to CSV. It then checks that the plot, readout, indicator and
+//!    text-console data are there.
 //! 2. With `--window`: the same script in a real eframe window.
 
 use std::path::{Path, PathBuf};
@@ -37,6 +40,8 @@ pub fn demo_dir() -> PathBuf {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Step {
     WaitConnected,
+    ConnectRef,
+    WaitRef,
     StartStream,
     WaitStream,
     SetBias,
@@ -51,9 +56,17 @@ enum Step {
     Sequence,
     WaitOperator,
     WaitSequence,
+    PlotBoth,
+    Compare,
+    WaitCompare,
+    ExportBoth,
+    WaitExport,
     Render,
     Done,
 }
+
+/// The sensor's output and the reference meter's, plotted together.
+const BOTH: [&str; 2] = ["telemetry.vout_raw", "ref.reading.vout_mv"];
 
 /// The scripted clicks, advanced one step per frame.
 struct Script {
@@ -97,6 +110,24 @@ impl Script {
             Step::WaitConnected => {
                 if s.connected() {
                     self.log.push("connected to the simulator".into());
+                    self.step = Step::ConnectRef;
+                }
+            }
+            Step::ConnectRef => {
+                // The `ref` device's status-bar indicator connects it.
+                match s.connect_device("ref") {
+                    Ok(()) => self.step = Step::WaitRef,
+                    Err(e) => self.fail(format!("connect ref: {e}")),
+                }
+            }
+            Step::WaitRef => {
+                let flowing = s
+                    .store()
+                    .and_then(|t| t.get("ref.reading.vout_mv"))
+                    .is_some_and(|c| c.total() > 20);
+                if s.device_connected("ref") && flowing && s.connected() {
+                    self.log
+                        .push("connected device `ref` (reference meter) alongside main".into());
                     self.step = Step::StartStream;
                 }
             }
@@ -106,7 +137,7 @@ impl Script {
             },
             Step::WaitStream => {
                 let ok = matches!(s.badges.get("Start Stream"), Some(Badge::Ok { .. }));
-                let store = s.session.as_ref().map(|x| x.telemetry().clone());
+                let store = s.store();
                 let data = store.is_some_and(|t| {
                     t.get("telemetry.vout_raw").is_some_and(|c| c.total() > 200)
                         && t.get("telemetry.state").is_some()
@@ -283,6 +314,70 @@ impl Script {
                     "smoke sequence passed with the operator entering load_ohms = 4700 ({} steps)",
                     r.summary.total
                 ));
+                self.step = Step::PlotBoth;
+            }
+            Step::PlotBoth => {
+                let mut cfg = crate::layout::TimePlotCfg::default();
+                for c in BOTH {
+                    cfg.add_channel(c);
+                }
+                app.add_panel(Panel::TimePlot(cfg));
+                self.step = Step::Compare;
+            }
+            Step::Compare => {
+                app.runner.select("compare");
+                match app.runner.start(&app.state, "compare") {
+                    Ok(()) => self.step = Step::WaitCompare,
+                    Err(e) => self.fail(format!("compare: {e}")),
+                }
+            }
+            Step::WaitCompare => {
+                if app.runner.is_running() {
+                    return;
+                }
+                let Some(r) = &app.runner.report else { return };
+                if r.sequence != "Compare with the reference meter" {
+                    return;
+                }
+                if !r.passed {
+                    return self.fail(format!("compare failed: {}", r.summary_text()));
+                }
+                self.log.push(format!(
+                    "compare passed across main and ref ({} steps)",
+                    r.summary.total
+                ));
+                self.step = Step::ExportBoth;
+            }
+            Step::ExportBoth => {
+                // Record > Export CSV (joined), both devices' channels.
+                s.export_csv(
+                    smoke_csv_path(),
+                    BOTH.iter().map(|c| c.to_string()).collect(),
+                    None,
+                    pb_core::recorder::CsvMode::Joined,
+                );
+                self.step = Step::WaitExport;
+            }
+            Step::WaitExport => {
+                let done = s
+                    .notifications
+                    .iter()
+                    .any(|(_, n)| n.contains("exported") && n.contains("smoke.csv"));
+                if !done {
+                    return;
+                }
+                let path = smoke_csv_path();
+                let text = std::fs::read_to_string(&path).unwrap_or_default();
+                let _ = std::fs::remove_file(&path);
+                let header = text.lines().next().unwrap_or_default();
+                if header != format!("time_s,{},{}", BOTH[0], BOTH[1]) || text.lines().count() < 100
+                {
+                    return self.fail(format!("two-device CSV export: header {header:?}"));
+                }
+                self.log.push(format!(
+                    "CSV export of both devices: {} rows ({header})",
+                    text.lines().count() - 1
+                ));
                 self.step = Step::Render;
             }
             Step::Render => {
@@ -307,6 +402,10 @@ impl Script {
     }
 }
 
+fn smoke_csv_path() -> PathBuf {
+    std::env::temp_dir().join(format!("protobench-smoke-{}.smoke.csv", std::process::id()))
+}
+
 fn smoke_parquet_path() -> PathBuf {
     std::env::temp_dir().join(format!(
         "protobench-smoke-{}.smoke.parquet",
@@ -316,17 +415,25 @@ fn smoke_parquet_path() -> PathBuf {
 
 fn verify(app: &ProtoBenchApp) -> Result<String, String> {
     let s = &app.state;
-    let store = s
-        .session
-        .as_ref()
-        .ok_or("disconnected")?
-        .telemetry()
-        .clone();
+    let store = s.store().ok_or("disconnected")?;
     let tabs: Vec<Panel> = app
         .dock
         .iter_all_tabs()
         .map(|(_, t)| t.panel.clone())
         .collect();
+    let both = tabs
+        .iter()
+        .find_map(|p| match p {
+            Panel::TimePlot(c) if c.traces.iter().any(|t| t.channel == BOTH[1]) => Some(c.clone()),
+            _ => None,
+        })
+        .ok_or("no plot of both devices")?;
+    for t in &both.traces {
+        let n = store.get(&t.channel).map(|c| c.total()).unwrap_or(0);
+        if n < 100 {
+            return Err(format!("two-device plot: {} has {n} samples", t.channel));
+        }
+    }
     let plot = tabs
         .iter()
         .find_map(|p| match p {
@@ -367,9 +474,13 @@ fn verify(app: &ProtoBenchApp) -> Result<String, String> {
         return Err("text console is empty".into());
     }
     let errors = s.session.as_ref().map(|x| x.stats().errors()).unwrap_or(0);
+    if !s.msg_log.iter().any(|e| &*e.device == "ref") {
+        return Err("no messages from device ref in the log".into());
+    }
     Ok(format!(
-        "plot traces {:?} live, {} channels, {} text lines, {} messages logged, link errors {errors}",
+        "plot traces {:?} and {:?} live, {} channels, {} text lines, {} messages logged, link errors {errors}",
         plot.traces.iter().map(|t| t.channel.as_str()).collect::<Vec<_>>(),
+        both.traces.iter().map(|t| t.channel.as_str()).collect::<Vec<_>>(),
         store.channels().len(),
         s.text_log.len(),
         s.msg_log.len()

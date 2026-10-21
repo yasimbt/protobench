@@ -77,21 +77,106 @@ fn not_connected(ui: &mut egui::Ui) {
     ui.weak("Not connected. Use Connection ▸ Connect.");
 }
 
-/// Command buttons grouped by `group`.
+/// A device picker. `all` adds an "all devices" entry (None). Shown only
+/// when the project has more than one device.
+pub fn device_picker(
+    ui: &mut egui::Ui,
+    state: &AppState,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    device: &mut Option<String>,
+    all: bool,
+) {
+    if !state.has_devices() {
+        return;
+    }
+    let label = device
+        .clone()
+        .unwrap_or_else(|| if all { "all devices" } else { "main" }.to_string());
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(label)
+        .show_ui(ui, |ui| {
+            if all {
+                ui.selectable_value(device, None, "all devices");
+            }
+            for d in state.device_names() {
+                let shown = (*device == Some(d.clone()))
+                    || (!all && device.is_none() && d == pb_core::config::MAIN_DEVICE);
+                if ui.selectable_label(shown, &d).clicked() {
+                    *device = Some(d);
+                }
+            }
+        });
+}
+
+/// The device a picker chose: its value, else `main`.
+pub fn picked(device: &Option<String>) -> &str {
+    device.as_deref().unwrap_or(pb_core::config::MAIN_DEVICE)
+}
+
+/// Command buttons: `main`'s grouped by `group`, then each other device's
+/// under its name.
 pub fn command_bar(ui: &mut egui::Ui, state: &mut AppState) {
     let Some(p) = &state.project else { return };
+    let devices: Vec<(String, String, Vec<pb_core::config::CommandConfig>)> = p
+        .all_devices()
+        .iter()
+        .map(|d| {
+            (
+                d.name.to_string(),
+                d.project.config.name.clone(),
+                d.project.config.commands.clone(),
+            )
+        })
+        .collect();
+    if devices.iter().all(|(_, _, c)| c.is_empty()) {
+        ui.weak("No [[commands]] in project.toml.");
+    }
+    let many = devices.len() > 1;
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        for (device, project_name, commands) in devices {
+            if many {
+                ui.horizontal(|ui| {
+                    device_dot(ui, state, &device);
+                    ui.strong(&device);
+                    ui.weak(&project_name);
+                });
+            }
+            ui.indent(("devcmds", &device), |ui| {
+                device_commands(ui, state, &device, &commands);
+            });
+        }
+    });
+}
+
+/// A small connection-state dot for a device.
+pub fn device_dot(ui: &mut egui::Ui, state: &AppState, device: &str) {
+    let st = state.device_state(device);
+    let c = match st {
+        pb_core::session::ConnState::Connected => OK,
+        pb_core::session::ConnState::Failed(_) => BAD,
+        pb_core::session::ConnState::Disconnected => Color32::GRAY,
+        _ => WARN,
+    };
+    ui.label(RichText::new("●").color(c))
+        .on_hover_text(st.label());
+}
+
+fn device_commands(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    device: &str,
+    commands: &[pb_core::config::CommandConfig],
+) {
     let groups: Vec<(String, Vec<pb_core::config::CommandConfig>)> =
-        pb_core::commands::group_commands(&p.config.commands)
+        pb_core::commands::group_commands(commands)
             .into_iter()
             .map(|(g, v)| (g, v.into_iter().cloned().collect()))
             .collect();
-    if groups.is_empty() {
-        ui.weak("No [[commands]] in project.toml.");
-    }
-    let connected = state.session.is_some();
-    egui::ScrollArea::vertical().show(ui, |ui| {
+    let connected = state.device_session(device).is_some();
+    {
         for (group, cmds) in groups {
             egui::CollapsingHeader::new(RichText::new(&group).strong())
+                .id_salt(("cmdgroup", device, &group))
                 .default_open(true)
                 .show(ui, |ui| {
                     for c in cmds {
@@ -123,11 +208,11 @@ pub fn command_bar(ui: &mut egui::Ui, state: &mut AppState) {
                                 }
                             };
                             if resp.clicked() {
-                                state.click_command(&c.name);
+                                state.click_command_on(device, &c.name);
                             }
-                            badge(ui, state.badges.get(&c.name));
+                            badge(ui, state.badges.get(&AppState::badge_key(device, &c.name)));
                             if let Some(ms) = c.periodic_ms {
-                                let mut on = state.is_periodic(&c.name);
+                                let mut on = state.is_periodic_on(device, &c.name);
                                 if ui
                                     .add_enabled(
                                         connected,
@@ -135,7 +220,7 @@ pub fn command_bar(ui: &mut egui::Ui, state: &mut AppState) {
                                     )
                                     .changed()
                                 {
-                                    if let Err(e) = state.set_periodic(&c.name, on) {
+                                    if let Err(e) = state.set_periodic_on(device, &c.name, on) {
                                         state.notify(e);
                                     }
                                 }
@@ -144,7 +229,7 @@ pub fn command_bar(ui: &mut egui::Ui, state: &mut AppState) {
                     }
                 });
         }
-    });
+    }
 }
 
 fn badge(ui: &mut egui::Ui, b: Option<&Badge>) {
@@ -189,6 +274,9 @@ pub fn history(ui: &mut egui::Ui, state: &mut AppState) {
                         resend = Some(*i);
                     }
                     ui.monospace(format!("{:9.3}", e.host_ts_ns as f64 / 1e9));
+                    if e.device != pb_core::config::MAIN_DEVICE {
+                        ui.label(RichText::new(format!("{}:", e.device)).weak());
+                    }
                     ui.strong(&e.name);
                     ui.label(RichText::new(e.payload.to_string()).monospace().weak());
                 });

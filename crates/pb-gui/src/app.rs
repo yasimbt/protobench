@@ -125,6 +125,11 @@ impl ProtoBenchApp {
         app
     }
 
+    /// Adds a panel to the focused dock leaf.
+    pub fn add_panel(&mut self, panel: Panel) {
+        self.actions.push(Action::AddPanel(panel));
+    }
+
     /// Opens a project and its layout.
     pub fn open_project(&mut self, dir: PathBuf) {
         self.save_layout_now();
@@ -222,20 +227,21 @@ impl ProtoBenchApp {
             return;
         }
         let Some(p) = &self.state.project else { return };
-        let cmds: Vec<(String, egui::KeyboardShortcut)> = p
-            .config
-            .commands
+        let cmds: Vec<(String, String, egui::KeyboardShortcut)> = p
+            .all_devices()
             .iter()
-            .filter_map(|c| {
-                c.shortcut
-                    .as_deref()
-                    .and_then(parse_shortcut)
-                    .map(|s| (c.name.clone(), s))
+            .flat_map(|d| {
+                d.project.config.commands.iter().filter_map(|c| {
+                    c.shortcut
+                        .as_deref()
+                        .and_then(parse_shortcut)
+                        .map(|s| (d.name.to_string(), c.name.clone(), s))
+                })
             })
             .collect();
-        for (name, sc) in cmds {
+        for (device, name, sc) in cmds {
             if ctx.input_mut(|i| i.consume_shortcut(&sc)) {
-                self.state.click_command(&name);
+                self.state.click_command_on(&device, &name);
             }
         }
         let marker = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::M);
@@ -351,7 +357,15 @@ impl ProtoBenchApp {
                         self.connect_selected();
                     }
                 } else if ui.button("Disconnect").clicked() {
-                    self.state.disconnect();
+                    if self.state.has_devices() {
+                        self.state.disconnect_device(pb_core::config::MAIN_DEVICE);
+                    } else {
+                        self.state.disconnect();
+                    }
+                }
+                if self.state.has_devices() {
+                    ui.separator();
+                    self.devices_menu(ui);
                 }
                 ui.separator();
                 ui.add_enabled_ui(connected, |ui| {
@@ -377,7 +391,7 @@ impl ProtoBenchApp {
                 });
             });
             ui.menu_button("Record", |ui| {
-                let connected = self.state.session.is_some();
+                let connected = self.state.running();
                 if self.state.recording.is_none() {
                     if ui
                         .add_enabled(connected, egui::Button::new("Start recording"))
@@ -576,6 +590,59 @@ impl ProtoBenchApp {
         });
     }
 
+    /// Connection-menu entries for the other devices: profile, connect,
+    /// disconnect, and all at once.
+    fn devices_menu(&mut self, ui: &mut egui::Ui) {
+        let st = &mut self.state;
+        ui.horizontal(|ui| {
+            if ui.button("Connect all").clicked() {
+                if let Err(e) = st.connect_all() {
+                    st.notify(format!("connect failed: {e}"));
+                }
+            }
+            if ui
+                .add_enabled(st.running(), egui::Button::new("Disconnect all"))
+                .clicked()
+            {
+                st.disconnect();
+            }
+        });
+        let devices: Vec<(String, Vec<pb_core::config::ConnectionProfile>)> = st
+            .project
+            .as_ref()
+            .map(|p| {
+                p.devices
+                    .iter()
+                    .map(|d| (d.name.clone(), d.project.config.connection.profiles.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for (name, profiles) in devices {
+            ui.menu_button(format!("Device {name}"), |ui| {
+                let current = st.device_profile_name(&name);
+                for pr in &profiles {
+                    let sel = current.as_deref() == Some(pr.name.as_str());
+                    if ui
+                        .selectable_label(sel, format!("{} — {}", pr.name, pr.endpoint()))
+                        .clicked()
+                    {
+                        st.device_profiles.insert(name.clone(), pr.name.clone());
+                    }
+                }
+                ui.separator();
+                if st.device_session(&name).is_none() {
+                    if ui.button(format!("Connect {name}")).clicked() {
+                        if let Err(e) = st.connect_device(&name) {
+                            st.notify(format!("connect {name} failed: {e}"));
+                        }
+                    }
+                } else if ui.button(format!("Disconnect {name}")).clicked() {
+                    st.disconnect_device(&name);
+                }
+            });
+        }
+    }
+
     fn with_session(&self, f: impl FnOnce(&pb_core::session::Session)) {
         if let Some(s) = &self.state.session {
             f(s);
@@ -591,8 +658,57 @@ impl ProtoBenchApp {
         }
     }
 
+    /// One clickable indicator per device: click connects or disconnects.
+    fn device_indicators(&mut self, ui: &mut egui::Ui) {
+        for name in self.state.device_names() {
+            let st = self.state.device_state(&name);
+            let c = match st {
+                pb_core::session::ConnState::Connected => Color32::from_rgb(0x2e, 0xcc, 0x71),
+                pb_core::session::ConnState::Failed(_) => Color32::from_rgb(0xe7, 0x4c, 0x3c),
+                pb_core::session::ConnState::Disconnected => Color32::GRAY,
+                _ => Color32::from_rgb(0xf3, 0x9c, 0x12),
+            };
+            let running = self.state.device_session(&name);
+            let hover = match &running {
+                Some(s) => {
+                    let r = s.stats();
+                    format!(
+                        "{name}: {} — {}\nrx {:.0} msg/s, errors {}\nclick to disconnect",
+                        st.label(),
+                        s.endpoint(),
+                        r.rx_mps,
+                        r.errors()
+                    )
+                }
+                None => format!(
+                    "{name}: {}\nclick to connect ({})",
+                    st.label(),
+                    self.state
+                        .device_profile_name(&name)
+                        .unwrap_or_else(|| "no profile".into())
+                ),
+            };
+            let text = RichText::new(format!("● {name}")).color(c);
+            if ui
+                .add(egui::Label::new(text).sense(egui::Sense::click()))
+                .on_hover_text(hover)
+                .clicked()
+            {
+                if running.is_some() {
+                    self.state.disconnect_device(&name);
+                } else if let Err(e) = self.state.connect_device(&name) {
+                    self.state.notify(format!("connect {name} failed: {e}"));
+                }
+            }
+        }
+        ui.separator();
+    }
+
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
+            if self.state.has_devices() {
+                self.device_indicators(ui);
+            }
             let (text, color) = match &self.state.session {
                 None => ("Disconnected".to_string(), Color32::GRAY),
                 Some(s) => {
@@ -641,10 +757,10 @@ impl ProtoBenchApp {
                 {
                     self.actions.push(Action::ShowLinkStats);
                 }
-                if let Some(e) = s.recording_elapsed_s() {
-                    ui.separator();
-                    ui.label(RichText::new(format!("● REC {e:.1} s")).color(Color32::RED));
-                }
+            }
+            if let Some(e) = self.state.recording_elapsed_s() {
+                ui.separator();
+                ui.label(RichText::new(format!("● REC {e:.1} s")).color(Color32::RED));
             }
             if let Some((addr, n)) = self.state.foxglove_status() {
                 ui.separator();
@@ -918,7 +1034,7 @@ impl ProtoBenchApp {
             self.last_layout_check = Instant::now();
             self.save_layout_now();
         }
-        if self.state.session.is_some() || self.runner.is_running() {
+        if self.state.running() || self.runner.is_running() {
             let fps = self.state.settings.fps_cap.clamp(1, 240);
             ctx.request_repaint_after(Duration::from_secs_f64(1.0 / f64::from(fps)));
         } else {

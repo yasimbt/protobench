@@ -71,6 +71,16 @@ The project's own device is `main`. Every device gets its own connection, I/O th
 
 `protobench check` checks the device list (names, paths, nesting, profiles), the devices named in sequences, and channels and derived-expression variables across devices.
 
+In the GUI:
+
+- The status bar has one indicator per device (`● main ● ref`): green when connected, amber while connecting, grey when off. Hover for the endpoint and rates; click to connect or disconnect that device alone.
+- **Connection ▸ Connect** connects `main` with the selected profile, **Connect all** connects every device, and **Connection ▸ Device ref** picks that device's profile and connects or disconnects it. A device that drops does not disturb the others.
+- The command bar shows `main`'s buttons, then each other device's under its name; badges and periodic sends are per device.
+- The message composer, schema browser, raw console, text console, inspector and link statistics have a device picker. The consoles can also show all devices, each line tagged with its device; raw bytes typed in the console go to the device shown. The message table tags other devices' messages (`ref:reading`).
+- Plots, readouts, indicators and tables take any device's channels by their full names; drag `ref.reading.vout_mv` next to `telemetry.vout_raw` to compare them on one time axis.
+- **Record ▸ Start recording** records every running device (and devices connected while it runs) into one file; exports use the full channel names.
+- The sequence runner runs on every running device.
+
 ## Main window
 
 - **Menu bar**: File, Connection, Record, View, Tools, Help.

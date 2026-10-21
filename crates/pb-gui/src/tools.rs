@@ -17,11 +17,11 @@ use pb_core::config::{
     ConnectionProfile, CrcKind, Endian, FramingConfig, FramingType, TransportKind,
 };
 use pb_core::sequence::{
-    run_sequence, OperatorPrompt, PromptAnswer, RunEvent, RunOptions, RunReport, SequenceFile,
-    StepReport, StepStatus,
+    run_sequence_on, OperatorPrompt, PromptAnswer, RunEvent, RunOptions, RunReport, SequenceFile,
+    StepReport, StepStatus, Target,
 };
 
-use crate::panels::{BAD, OK, WARN};
+use crate::panels::{device_picker, picked, BAD, OK, WARN};
 use crate::state::{AppState, OperatorReply, Settings};
 
 // ---------------------------------------------------------------- composer
@@ -29,6 +29,8 @@ use crate::state::{AppState, OperatorReply, Settings};
 /// Message composer state.
 #[derive(Default)]
 pub struct ComposerState {
+    /// Device to compose for (None: `main`).
+    pub device: Option<String>,
     /// Selected target (oneof member or type name).
     pub target: Option<String>,
     /// The inner message being edited.
@@ -45,14 +47,14 @@ pub struct ComposerState {
     pub status: Option<String>,
 }
 
-/// Codec for the open project (the session's if connected).
-fn project_codec(state: &AppState) -> Option<Codec> {
-    if let Some(s) = &state.session {
+/// Codec of a device (its session's if connected).
+fn device_codec(state: &AppState, device: &str) -> Option<Codec> {
+    if let Some(s) = state.device_session(device) {
         return Some((**s.codec()).clone());
     }
-    let p = state.project.as_ref()?;
-    let schema = p.schema.as_ref()?;
-    Codec::new(&p.config, schema, Role::Host).ok()
+    let d = state.project.as_ref()?.device(device)?;
+    let schema = d.project.schema.as_ref()?;
+    Codec::new(&d.project.config, schema, Role::Host).ok()
 }
 
 /// Names the composer can send: oneof members of tx_root (envelope), the
@@ -134,9 +136,8 @@ impl ComposerState {
             None => None,
         };
         let cfg = state
-            .project
-            .as_ref()
-            .map(|p| p.config.correlation.clone())
+            .device_config(picked(&self.device))
+            .map(|c| c.correlation.clone())
             .unwrap_or_default();
         Ok(SendRequest {
             name: format!("composer: {name}"),
@@ -147,15 +148,15 @@ impl ComposerState {
         })
     }
 
-    /// Sends the composed message.
+    /// Sends the composed message to the selected device.
     pub fn send(&mut self, state: &mut AppState) -> Result<u64, String> {
+        let device = picked(&self.device).to_string();
         let codec = state
-            .session
-            .as_ref()
+            .device_session(&device)
             .map(|s| (**s.codec()).clone())
             .ok_or("not connected")?;
         let req = self.request(&codec, state)?;
-        Ok(state.send_request(req))
+        Ok(state.send_request_on(&device, req))
     }
 }
 
@@ -378,7 +379,23 @@ fn edit_field(
 
 /// The composer window body.
 pub fn composer(ui: &mut egui::Ui, cs: &mut ComposerState, state: &mut AppState) {
-    let Some(codec) = project_codec(state) else {
+    let before = cs.device.clone();
+    ui.horizontal(|ui| {
+        if state.has_devices() {
+            ui.label("Device");
+            device_picker(ui, state, "composer_device", &mut cs.device, false);
+        }
+    });
+    if cs.device != before {
+        // Another device has another schema: start over.
+        let device = cs.device.clone();
+        *cs = ComposerState {
+            device,
+            ..Default::default()
+        };
+    }
+    let device = picked(&cs.device).to_string();
+    let Some(codec) = device_codec(state, &device) else {
         ui.weak("Open a project with a valid schema.");
         return;
     };
@@ -465,7 +482,10 @@ pub fn composer(ui: &mut egui::Ui, cs: &mut ComposerState, state: &mut AppState)
     ui.separator();
     ui.horizontal(|ui| {
         if ui
-            .add_enabled(state.session.is_some(), egui::Button::new("Send"))
+            .add_enabled(
+                state.device_session(&device).is_some(),
+                egui::Button::new("Send"),
+            )
             .clicked()
         {
             cs.status = Some(match cs.send(state) {
@@ -474,7 +494,8 @@ pub fn composer(ui: &mut egui::Ui, cs: &mut ComposerState, state: &mut AppState)
             });
         }
         if let Some(t) = &cs.target {
-            if let Some(b) = state.badges.get(&format!("composer: {t}")) {
+            let key = AppState::badge_key(&device, &format!("composer: {t}"));
+            if let Some(b) = state.badges.get(&key) {
                 ui.label(format!("{b:?}"));
             }
         }
@@ -500,7 +521,8 @@ pub fn composer(ui: &mut egui::Ui, cs: &mut ComposerState, state: &mut AppState)
                 cs.save_group.trim().to_string()
             };
             let target = cs.target.clone().unwrap_or_default();
-            let r = state.save_command(
+            let r = state.save_command_on(
+                &device,
                 cs.save_name.trim(),
                 &group,
                 &target,
@@ -525,6 +547,7 @@ pub fn composer(ui: &mut egui::Ui, cs: &mut ComposerState, state: &mut AppState)
 pub struct SchemaBrowserState {
     filter: String,
     show_support: bool,
+    device: Option<String>,
 }
 
 fn label_of(f: &FieldDescriptor) -> String {
@@ -555,7 +578,15 @@ fn kind_name(k: &Kind) -> String {
 
 /// Schema browser body.
 pub fn schema_browser(ui: &mut egui::Ui, st: &mut SchemaBrowserState, state: &AppState) {
-    let Some(schema) = state.project.as_ref().and_then(|p| p.schema.clone()) else {
+    let schema = state
+        .project
+        .as_ref()
+        .and_then(|p| p.device(picked(&st.device)))
+        .and_then(|d| d.project.schema.clone());
+    ui.horizontal(|ui| {
+        device_picker(ui, state, "schema_device", &mut st.device, false);
+    });
+    let Some(schema) = schema else {
         ui.weak("No schema loaded.");
         return;
     };
@@ -721,11 +752,25 @@ impl RunnerState {
     }
 
     /// Starts a sequence by name, with the variables table as overrides.
+    /// It runs on every device of the project that is running.
     pub fn start(&mut self, state: &AppState, name: &str) -> Result<(), String> {
         let p = state.project.as_ref().ok_or("no project")?;
-        let session = state.session.clone().ok_or("connect first")?;
+        if !state.running() {
+            return Err("connect first".into());
+        }
         let seq = SequenceFile::load(&p.sequence_path(name)).map_err(|e| e.to_string())?;
-        let config = p.config.clone();
+        // Owned per-device parts for the run thread.
+        let devices: Vec<(String, Option<Arc<pb_core::session::Session>>, _)> = p
+            .all_devices()
+            .iter()
+            .map(|d| {
+                (
+                    d.name.to_string(),
+                    state.device_session(d.name),
+                    d.project.config.clone(),
+                )
+            })
+            .collect();
         let (tx, rx) = crossbeam_channel::unbounded();
         let abort = Arc::new(AtomicBool::new(false));
         let vars = if self.vars_for.as_deref() == Some(name) {
@@ -764,7 +809,15 @@ impl RunnerState {
                         _ => PromptAnswer::Fail,
                     }
                 });
-                run_sequence(&session, &config, &seq, opts, &mut on_event, Some(prompt));
+                let targets: Vec<Target> = devices
+                    .iter()
+                    .map(|(name, session, config)| Target {
+                        name,
+                        session: session.as_deref(),
+                        config,
+                    })
+                    .collect();
+                run_sequence_on(&targets, &seq, opts, &mut on_event, Some(prompt));
             })
             .map_err(|e| e.to_string())?;
         self.running = Some(RunHandle { abort, events: rx });
@@ -846,7 +899,7 @@ pub fn runner(ui: &mut egui::Ui, rs: &mut RunnerState, state: &mut AppState) {
             }
             ui.spinner();
         } else {
-            let can = rs.selected.is_some() && state.session.is_some();
+            let can = rs.selected.is_some() && state.running();
             if ui.add_enabled(can, egui::Button::new("▶ Run")).clicked() {
                 if let Some(n) = rs.selected.clone() {
                     if let Err(e) = rs.start(state, &n) {
@@ -911,7 +964,7 @@ pub fn runner(ui: &mut egui::Ui, rs: &mut RunnerState, state: &mut AppState) {
                 });
             });
     }
-    if state.session.is_none() {
+    if !state.running() {
         ui.weak("Connect to run sequences.");
     }
     if let Some(e) = &rs.error {

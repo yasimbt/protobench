@@ -7,6 +7,8 @@ use std::collections::VecDeque;
 pub struct HistoryEntry {
     /// Host time in ns.
     pub host_ts_ns: u64,
+    /// Device it was sent to (`main` for the project's own).
+    pub device: String,
     /// Command name or message name.
     pub name: String,
     /// Message (or oneof member) that was sent.
@@ -77,6 +79,7 @@ mod tests {
         let mut h = CommandHistory::new(2);
         for i in 0..3 {
             h.push(HistoryEntry {
+                device: "main".into(),
                 host_ts_ns: i,
                 name: format!("c{i}"),
                 message: "ping".into(),

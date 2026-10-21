@@ -46,7 +46,7 @@ One of `proto_files` or `descriptor_set` is required. `import "nanopb.proto";` a
 | Key | Type | Default | Used by | Meaning |
 |---|---|---|---|---|
 | `name` | string | `"default"` | all | Profile name (unique). |
-| `transport` | string | `"serial"` | all | `serial`, `tcp_client`, `tcp_server`, `udp`, `sim`, `replay`, `mqtt` or `can`. |
+| `transport` | string | `"serial"` | all | `serial`, `tcp_client`, `tcp_server`, `udp`, `sim`, `replay`, `mqtt`, `can` or `rtt`. |
 | `port` | string | `"auto"` | serial | Port name (`COM5`, `/dev/ttyACM0`) or `"auto"`: the one port matching `usb_vid`, `usb_pid` and `usb_serial`. Without any of them, the only USB serial port (or the only port, when none is USB). Several matches are an error that lists them. |
 | `usb_vid` | integer | none | serial | USB vendor ID for `port = "auto"`. |
 | `usb_pid` | integer | none | serial | USB product ID for `port = "auto"`. |
@@ -92,6 +92,14 @@ One of `proto_files` or `descriptor_set` is required. `import "nanopb.proto";` a
 | `isotp_st_min_us` | integer | `0` | can | Minimum gap between consecutive frames the host asks for, in µs (100 µs steps below 1 ms, then ms, up to 127000). |
 | `isotp_padding` | integer | none | can | Pad frames to full length with this byte (some ECUs require 0x55 or 0xAA). FD frames above 8 bytes are always padded to a valid length. |
 | `isotp_timeout_ms` | integer | `1000` | can | How long to wait for flow control or the next consecutive frame (N_Bs, N_Cr). |
+| `chip` | string | required | rtt | probe-rs target name, such as `STM32F411RETx`, `nRF52840_xxAA` or `RP2040` (`probe-rs chip list` shows them all). |
+| `probe` | string | the only one attached | rtt | Which probe: `VID:PID`, `VID:PID:SERIAL` or a serial number, as `protobench list-probes` prints. |
+| `rtt_up` | integer | `1` | rtt | Up channel (target → host) carrying the protobuf byte stream. |
+| `rtt_down` | integer | `1` | rtt | Down channel (host → target) for commands. |
+| `rtt_text_channel` | integer | none | rtt | Up channel shown in the text console, usually `0` (where SEGGER's `printf` and `rtt-target`'s `rprintln!` write). |
+| `attach` | bool | `true` | rtt | Attach to the running core. `false` holds reset while attaching and restarts the firmware. |
+| `elf` | string | none | rtt | The firmware's ELF file, relative to the project: the `_SEGGER_RTT` symbol gives the control block's address. Without it RAM is scanned, which works but takes longer on chips with much RAM. |
+| `probe_speed_khz` | integer | probe default | rtt | SWD/JTAG clock. |
 
 The `sim` transport runs the built-in simulator in-process. A `tcp_server` serves one client at a time and goes back to listening when it disconnects. An `mqtt` or `can` profile usually goes with `framing.type = "none"`, since every MQTT message or ISO-TP message is already one frame (a CRC is still possible).
 

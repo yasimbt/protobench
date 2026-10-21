@@ -460,6 +460,13 @@ fn link_profiles() -> Vec<pb_core::config::ConnectionProfile> {
             data_bitrate: Some(2_000_000),
             ..Default::default()
         },
+        ConnectionProfile {
+            name: "probe".into(),
+            transport: TransportKind::Rtt,
+            chip: "STM32F411RETx".into(),
+            rtt_text_channel: Some(0),
+            ..Default::default()
+        },
     ]
 }
 

@@ -39,6 +39,8 @@ rhai = { version = "1.26", features = ["sync", "serde"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-native-certs = "0.8"
 socketcan = { version = "4", default-features = false }
+probe-rs = { version = "0.32", default-features = false, features = ["builtin-targets", "object"] }
+object = { version = "0.39", default-features = false, features = ["read_core", "elf", "std"] }
 rustls-pki-types = { version = "1.12", features = ["std"] }
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 rfd = "0.17.2"

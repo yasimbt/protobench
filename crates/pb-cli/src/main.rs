@@ -15,7 +15,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 #[command(name = "protobench", version, about)]
 struct Cli {
     /// Log level filter (e.g. `info`, `debug`, `pb_core=trace`).
-    #[arg(long, global = true, default_value = "warn")]
+    #[arg(long, global = true, default_value = "warn,probe_rs=error")]
     log: String,
     #[command(subcommand)]
     command: Command,
@@ -34,6 +34,12 @@ pub enum NonInteractive {
 enum Command {
     /// List serial ports with USB IDs.
     ListPorts {
+        /// Print JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List debug probes (J-Link, ST-Link, CMSIS-DAP) for RTT profiles.
+    ListProbes {
         /// Print JSON.
         #[arg(long)]
         json: bool,
@@ -215,6 +221,7 @@ fn main() -> ExitCode {
         .init();
     let r = match cli.command {
         Command::ListPorts { json } => cmd::list_ports(json),
+        Command::ListProbes { json } => cmd::list_probes(json),
         Command::Schema { project, message } => cmd::schema(&project, message.as_deref()),
         Command::Send {
             project,

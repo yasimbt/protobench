@@ -33,7 +33,7 @@ struct Args {
     #[arg(long)]
     write_default_layout: bool,
     /// Log filter.
-    #[arg(long, default_value = "warn")]
+    #[arg(long, default_value = "warn,probe_rs=error")]
     log: String,
 }
 

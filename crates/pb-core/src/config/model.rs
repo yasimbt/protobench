@@ -175,6 +175,8 @@ pub enum TransportKind {
     Mqtt,
     /// CAN or CAN FD, with ISO-TP: an slcan adapter or SocketCAN.
     Can,
+    /// SEGGER RTT through a debug probe.
+    Rtt,
 }
 
 /// How a transport delivers data, which decides the framing that suits it.
@@ -199,6 +201,7 @@ impl TransportKind {
         TransportKind::Replay,
         TransportKind::Mqtt,
         TransportKind::Can,
+        TransportKind::Rtt,
     ];
 
     /// The name used in `project.toml`.
@@ -212,15 +215,17 @@ impl TransportKind {
             TransportKind::Replay => "replay",
             TransportKind::Mqtt => "mqtt",
             TransportKind::Can => "can",
+            TransportKind::Rtt => "rtt",
         }
     }
 
     /// Stream or message link.
     pub fn link_kind(self) -> LinkKind {
         match self {
-            TransportKind::Serial | TransportKind::TcpClient | TransportKind::TcpServer => {
-                LinkKind::Stream
-            }
+            TransportKind::Serial
+            | TransportKind::TcpClient
+            | TransportKind::TcpServer
+            | TransportKind::Rtt => LinkKind::Stream,
             TransportKind::Udp | TransportKind::Sim | TransportKind::Replay => LinkKind::Either,
             TransportKind::Mqtt | TransportKind::Can => LinkKind::Message,
         }
@@ -366,6 +371,24 @@ pub struct ConnectionProfile {
     pub isotp_padding: Option<u8>,
     /// ISO-TP timeout for flow control and consecutive frames (N_Bs, N_Cr).
     pub isotp_timeout_ms: u64,
+    /// RTT: probe-rs target name, e.g. `STM32F411RETx` or `nRF52840_xxAA`.
+    pub chip: String,
+    /// RTT: probe to use, `VID:PID`, `VID:PID:SERIAL` or a serial number;
+    /// optional with one probe attached.
+    pub probe: Option<String>,
+    /// RTT up channel carrying data (target → host).
+    pub rtt_up: usize,
+    /// RTT down channel carrying data (host → target).
+    pub rtt_down: usize,
+    /// RTT up channel shown in the text console (`printf`), usually 0.
+    pub rtt_text_channel: Option<usize>,
+    /// RTT: attach to the running core (true) or reset it while attaching.
+    pub attach: bool,
+    /// RTT: ELF file whose `_SEGGER_RTT` symbol locates the control block
+    /// (otherwise RAM is scanned).
+    pub elf: Option<String>,
+    /// RTT: SWD/JTAG clock in kHz.
+    pub probe_speed_khz: Option<u32>,
 }
 
 /// CAN interfaces.
@@ -430,6 +453,14 @@ impl Default for ConnectionProfile {
             isotp_st_min_us: 0,
             isotp_padding: None,
             isotp_timeout_ms: 1000,
+            chip: String::new(),
+            probe: None,
+            rtt_up: 1,
+            rtt_down: 1,
+            rtt_text_channel: None,
+            attach: true,
+            elf: None,
+            probe_speed_khz: None,
         }
     }
 }
@@ -454,6 +485,15 @@ impl ConnectionProfile {
             TransportKind::Replay => {
                 format!("replay {}", self.file.as_deref().unwrap_or("(no file)"))
             }
+            TransportKind::Rtt => format!(
+                "rtt {} via {}",
+                if self.chip.is_empty() {
+                    "(no chip)"
+                } else {
+                    &self.chip
+                },
+                self.probe.as_deref().unwrap_or("the attached probe")
+            ),
             TransportKind::Can => {
                 let ids = match (self.tx_id, self.rx_id) {
                     (Some(t), Some(r)) => format!(" tx {t:#x} rx {r:#x}"),

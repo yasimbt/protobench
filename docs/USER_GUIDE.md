@@ -76,6 +76,28 @@ TLS checks the broker's certificate against the operating system's root store; `
 
 `protobench sim --project . --mqtt localhost:1883` runs the project's simulator as an MQTT device on a broker: it subscribes to the first mqtt profile's `publish` topic and publishes to its first `subscribe` filter (with `+`/`#` replaced by `sim`), so `run --profile cloud --port localhost:1883` works end to end without hardware. `--profile` picks another mqtt profile. A local broker is a one-liner, e.g. `mosquitto -p 1883`; ProtoBench's own tests use a small built-in broker.
 
+### SEGGER RTT
+
+With a debug probe already on the board (J-Link, ST-Link, a CMSIS-DAP v2 probe such as a Pico probe or DAPLink), ProtoBench can talk to the firmware through RTT instead of a UART: the firmware writes into ring buffers in its RAM and the probe reads them while the core runs.
+
+```toml
+[[connection.profiles]]
+name = "rtt"
+transport = "rtt"
+chip = "STM32F411RETx"           # probe-rs target name
+rtt_up = 1                       # protobuf frames, target → host
+rtt_down = 1                     # commands, host → target
+rtt_text_channel = 0             # printf → text console
+# probe = "0483:374e:004D00213137510D33333639"   # with several probes
+# elf = "build/firmware.elf"     # find _SEGGER_RTT directly instead of scanning RAM
+```
+
+The data channel is a byte stream like a UART, so keep the project's framing (COBS, SLIP, a length prefix). `rtt_text_channel` puts a second channel, usually the default `printf` channel 0, into the text console, so logs and data no longer share a wire. `protobench list-probes` (and the ▾ menu next to **probe** in the project editor) lists attached probes. If the probe is unplugged or the target is power-cycled, the connection reconnects like a serial port. `attach = false` resets the target while attaching.
+
+On Linux the probe needs USB access (a udev rule, as for any probe-rs tool); on Windows, J-Link and ST-Link work with their usual drivers and CMSIS-DAP v2 probes with WinUSB. Under WSL2, attach the probe with `usbipd`.
+
+If you already run a J-Link GDB server or OpenOCD, their RTT servers work too, with no probe access needed by ProtoBench: a `tcp_client` profile to port 19021 (J-Link) or to the port OpenOCD's `rtt server start` opened gives you the channel as a TCP stream. J-Link prints a short banner when you connect; with text passthrough on it lands in the text console.
+
 ### CAN
 
 CAN-only devices connect through an slcan adapter (a CANable, USBtin or CANtact with slcan firmware, about any USB CAN stick) on any OS, or through a Linux SocketCAN interface:
@@ -322,6 +344,7 @@ Scripts are sandboxed: no file, network or module access, at most 50 million ope
 
 ```
 protobench list-ports [--json]
+protobench list-probes [--json]
 protobench schema   --project <dir> [--message <type>]
 protobench send     --project <dir> [--device <name>] [--profile <name>] [--port <p>] --command <name> [--set field=value ...] [--wait]
 protobench monitor  --project <dir> [--profile [<device>=]<name>]... [--port [<device>=]<p>]... [--only <devices>]
@@ -336,6 +359,7 @@ protobench sim      --project <dir> [--tcp <port>] [--bind <addr>] | [--mqtt <br
 ```
 
 - `list-ports` prints ports with USB VID:PID, serial numbers and product names (`--json` for scripts).
+- `list-probes` prints the debug probes RTT profiles can use, with the `VID:PID:SERIAL` to put in `probe`.
 - `schema` prints messages, fields with numbers, types and comments, and enums.
 - `send` sends one command. `--set millivolts=300` overrides payload fields (values in TOML syntax). Without `--wait` it is fire-and-forget; with it, the reply is printed as JSON and the exit code is 1 on timeout or error.
 - `monitor` prints decoded messages and text lines (`--json`: one object per line), or with `--channels` the latest channel values whenever they change. `--send` sends commands after connecting; `--duration` stops after N seconds; `--record` writes a session file. `--foxglove 8765` also serves the session to Foxglove (see *Foxglove server*), on `127.0.0.1` unless `--foxglove-bind 0.0.0.0`. With a `tcp_server` profile, `monitor`, `send` and `run` wait for the client to connect.

@@ -499,6 +499,29 @@ fn validate_profile(p: &ConnectionProfile, i: usize, framing: &FramingConfig, f:
                 );
             }
         }
+        TransportKind::Rtt => {
+            if p.chip.trim().is_empty() {
+                f.err(
+                    key_path!["connection", "profiles", i],
+                    "rtt needs `chip` (the probe-rs target name, e.g. STM32F411RETx)".into(),
+                );
+            }
+            if p.rtt_text_channel == Some(p.rtt_up) {
+                f.err(
+                    at("rtt_text_channel"),
+                    format!(
+                        "rtt_text_channel and rtt_up are both channel {}; text needs a channel of its own",
+                        p.rtt_up
+                    ),
+                );
+            }
+            if !crate::transport::rtt::SUPPORTED {
+                f.warn(
+                    at("transport"),
+                    "this build has no RTT support (cargo feature `rtt`)".into(),
+                );
+            }
+        }
         TransportKind::Replay => {
             if p.file.as_deref().is_none_or(|x| x.trim().is_empty()) {
                 f.err(
@@ -663,6 +686,7 @@ mod tests {
                 p.tx_id = Some(0x900);
                 p.bitrate = 333_000;
             }),
+            bad(TransportKind::Rtt, &|p| p.rtt_text_channel = Some(1)),
             bad(TransportKind::Can, &|p| {
                 p.tx_id = Some(0x10);
                 p.rx_id = Some(0x10);
@@ -723,10 +747,15 @@ mod tests {
             has("connection.profiles[6].bitrate", "slcan adapters take"),
             "{f:#?}"
         );
-        assert!(has("connection.profiles[7].rx_id", "must differ"), "{f:#?}");
+        assert!(has("connection.profiles[7]", "rtt needs `chip`"), "{f:#?}");
+        assert!(
+            has("connection.profiles[7].rtt_text_channel", "both channel 1"),
+            "{f:#?}"
+        );
+        assert!(has("connection.profiles[8].rx_id", "must differ"), "{f:#?}");
         assert!(
             has(
-                "connection.profiles[7].interface",
+                "connection.profiles[8].interface",
                 "socketcan needs `interface`"
             ),
             "{f:#?}"

@@ -3,7 +3,7 @@
 ProtoBench is a desktop and command-line tool for developing and testing embedded sensors and systems that talk Protocol Buffers. Point it at your firmware's `.proto` files and it decodes the device's messages live, plots telemetry, sends commands from buttons or an auto-generated form, records sessions, and runs test sequences headlessly in CI or on a test jig.
 
 - Schemas are compiled at runtime with [protox](https://crates.io/crates/protox): no `protoc` to install. nanopb options (`import "nanopb.proto"`, `[(nanopb).max_size = 16]`) parse as-is.
-- Serial/USB-CDC (with DTR/RTS, pulse reset, hot-plug reconnect, USB serial-number matching), TCP client and server, UDP, MQTT (TLS, QoS 0/1), CAN and CAN FD with ISO-TP (slcan adapters on any OS, SocketCAN on Linux), replay of recordings, and a built-in device simulator.
+- Serial/USB-CDC (with DTR/RTS, pulse reset, hot-plug reconnect, USB serial-number matching), TCP client and server, UDP, MQTT (TLS, QoS 0/1), CAN and CAN FD with ISO-TP (slcan adapters on any OS, SocketCAN on Linux), SEGGER RTT through J-Link, ST-Link and CMSIS-DAP probes, replay of recordings, and a built-in device simulator.
 - COBS, SLIP, varint or fixed length prefix (optional sync word), CRC-8/16/32, envelope (`oneof`), message-ID prefix or fixed dispatch, firmware `printf` lines on the same UART.
 - Dockable dashboards saved per project: time plots with two Y axes, cursors and min/max decimation for millions of points; XY plots; readouts with limit colours; enum/bool indicators; message tables and inspector with byte highlighting; raw and text consoles; channel and link statistics; histogram/FFT.
 - Request/response correlation with timeouts and retries, periodic sends, derived channels, field metadata (units, scale, limits).

@@ -55,6 +55,31 @@ Every transport read is one frame: one UDP datagram, for example. The CRC, if co
 
 On a link that carries whole messages, such as MQTT, set `type = "none"`: the MQTT payload is exactly what goes between the delimiters on a serial line, the codec bytes plus the optional CRC, with no COBS, SLIP or length prefix. The firmware publishes one encoded message per MQTT PUBLISH to the topic ProtoBench subscribes to, and decodes each PUBLISH it receives on the command topic as one message.
 
+### SEGGER RTT
+
+Over RTT the firmware writes the same framed bytes it would send to a UART (COBS, SLIP or a length prefix, with the CRC) into an RTT up buffer, and reads commands from a down buffer. Keep `printf` on channel 0 and give the protobuf stream a channel of its own:
+
+```c
+#include "SEGGER_RTT.h"
+
+static uint8_t pb_up[1024], pb_down[256];
+
+void link_init(void) {
+    SEGGER_RTT_ConfigUpBuffer(1, "proto", pb_up, sizeof pb_up, SEGGER_RTT_MODE_NO_BLOCK_SKIP);
+    SEGGER_RTT_ConfigDownBuffer(1, "proto", pb_down, sizeof pb_down, SEGGER_RTT_MODE_NO_BLOCK_SKIP);
+}
+
+void link_send(const uint8_t *frame, unsigned len) {   /* a complete COBS frame */
+    SEGGER_RTT_Write(1, frame, len);                    /* skipped whole if it does not fit */
+}
+
+unsigned link_poll(uint8_t *buf, unsigned size) {      /* feed the result to the COBS decoder */
+    return SEGGER_RTT_Read(1, buf, size);
+}
+```
+
+`NO_BLOCK_SKIP` drops a frame that does not fit rather than writing half of it, which a framer would then reject; `NO_BLOCK_TRIM` would cut frames. In Rust firmware, `rtt-target`'s `rtt_init!` declares the same two channels (up 0 "Terminal" and 1 "proto", down 1 "proto"). Profile: `rtt_up = 1`, `rtt_down = 1`, `rtt_text_channel = 0`.
+
 ### CAN with ISO-TP
 
 On CAN, set `type = "none"` as well: ISO-TP delimits each message. The firmware sends the encoded message (plus the optional CRC) as an ISO-TP payload with the identifier the host listens on (`rx_id` in the profile, 0x7E8 in the examples) and receives commands on the host's `tx_id` (0x7E0). Normal addressing, no extended addressing byte. When the host receives a first frame it answers with flow control `30 BS ST` from `isotp_block_size` and `isotp_st_min_us` (default `30 00 00`: send everything, no gap); when the host sends a long command it waits up to `isotp_timeout_ms` for the device's flow control and honours its block size and STmin (including the 100–900 µs codes `F1`–`F9`), WAIT frames, and overflow. Any ISO-TP library for the MCU works (for example isotp-c); on Linux the kernel's `CAN_ISOTP` sockets do too.

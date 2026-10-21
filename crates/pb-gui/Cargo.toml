@@ -9,6 +9,11 @@ license.workspace = true
 name = "protobench-gui"
 path = "src/main.rs"
 
+[features]
+default = ["rtt"]
+# SEGGER RTT through debug probes (probe-rs).
+rtt = ["pb-core/rtt"]
+
 [dependencies]
 pb-core.workspace = true
 pb-sim.workspace = true

@@ -261,6 +261,14 @@ fn schema_and_list_ports() {
     assert!(!s.contains("google.protobuf"));
     let out = bin().arg("list-ports").output().unwrap();
     assert_eq!(out.status.code(), Some(0));
+    // No probe attached: still exit 0.
+    let out = bin().arg("list-probes").output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    let out = bin().args(["list-probes", "--json"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert!(serde_json::from_slice::<serde_json::Value>(&out.stdout)
+        .unwrap()
+        .is_array());
     let out = bin().args(["list-ports", "--json"]).output().unwrap();
     assert_eq!(out.status.code(), Some(0));
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();

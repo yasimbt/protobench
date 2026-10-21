@@ -162,6 +162,24 @@ pub fn list_ports(json: bool) -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+pub fn list_probes(json: bool) -> Result<ExitCode> {
+    use pb_core::transport::rtt;
+    let probes = rtt::list_probes();
+    if json {
+        println!("{}", serde_json::to_string_pretty(&probes)?);
+    } else if !rtt::SUPPORTED {
+        println!("this build has no RTT support (cargo feature `rtt`)");
+    } else if probes.is_empty() {
+        println!("no debug probes found");
+    } else {
+        println!("{:<28} PROBE (use as `probe = \"…\"`)", "NAME");
+        for p in probes {
+            println!("{:<28} {}", p.identifier, p.selector());
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
 fn kind_name(f: &prost_reflect::FieldDescriptor) -> String {
     let base = match f.kind() {
         Kind::Message(m) if f.is_map() => {

@@ -1207,6 +1207,58 @@ fn mqtt_fields(ui: &mut egui::Ui, pr: &mut ConnectionProfile, i: usize) {
     }
 }
 
+/// Grid rows of an RTT profile.
+fn rtt_fields(ui: &mut egui::Ui, pr: &mut ConnectionProfile) {
+    ui.label("chip");
+    ui.add(egui::TextEdit::singleline(&mut pr.chip).hint_text("STM32F411RETx"));
+    ui.end_row();
+    ui.label("probe");
+    ui.horizontal(|ui| {
+        opt_text(ui, &mut pr.probe, "the only one attached");
+        ui.menu_button("▾", |ui| {
+            let probes = pb_core::transport::rtt::list_probes();
+            if !pb_core::transport::rtt::SUPPORTED {
+                ui.weak("this build has no RTT support");
+            } else if probes.is_empty() {
+                ui.weak("no debug probes found");
+            }
+            for p in probes {
+                if ui
+                    .button(format!("{}  {}", p.identifier, p.selector()))
+                    .clicked()
+                {
+                    pr.probe = Some(p.selector());
+                    ui.close();
+                }
+            }
+        });
+    });
+    ui.end_row();
+    ui.label("data up / down channel");
+    ui.horizontal(|ui| {
+        ui.add(egui::DragValue::new(&mut pr.rtt_up).range(0..=15));
+        ui.add(egui::DragValue::new(&mut pr.rtt_down).range(0..=15));
+    });
+    ui.end_row();
+    ui.label("text channel");
+    ui.horizontal(|ui| {
+        let mut on = pr.rtt_text_channel.is_some();
+        if ui.checkbox(&mut on, "printf to the text console").changed() {
+            pr.rtt_text_channel = on.then_some(0);
+        }
+        if let Some(t) = pr.rtt_text_channel.as_mut() {
+            ui.add(egui::DragValue::new(t).range(0..=15));
+        }
+    });
+    ui.end_row();
+    ui.label("attach");
+    ui.checkbox(&mut pr.attach, "to the running core (off: reset)");
+    ui.end_row();
+    ui.label("ELF (finds _SEGGER_RTT)");
+    opt_text(ui, &mut pr.elf, "build/firmware.elf");
+    ui.end_row();
+}
+
 /// A hex text field for an optional CAN identifier.
 fn hex_u32_edit(ui: &mut egui::Ui, v: &mut Option<u32>) {
     let mut text = v.map(|x| format!("{x:X}")).unwrap_or_default();
@@ -1558,6 +1610,7 @@ pub fn project_editor(
                                 TransportKind::Sim => {}
                                 TransportKind::Mqtt => mqtt_fields(ui, pr, i),
                                 TransportKind::Can => can_fields(ui, pr, i),
+                                TransportKind::Rtt => rtt_fields(ui, pr),
                             }
                             ui.label("auto reconnect");
                             ui.checkbox(&mut pr.auto_reconnect, "");

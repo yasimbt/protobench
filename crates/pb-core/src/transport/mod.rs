@@ -9,6 +9,7 @@ mod loopback;
 pub mod mqtt;
 mod net;
 pub mod replay;
+pub mod rtt;
 mod serial;
 
 use std::io;
@@ -140,6 +141,7 @@ pub fn connector_for(
             TransportKind::Udp => p.target = Some(o),
             TransportKind::Replay => p.file = Some(o),
             TransportKind::Mqtt => p.broker = o,
+            TransportKind::Rtt => p.probe = Some(o),
             TransportKind::Can => match p.can_backend {
                 crate::config::CanBackend::Slcan => p.port = o,
                 crate::config::CanBackend::Socketcan => p.interface = o,
@@ -174,6 +176,7 @@ pub fn connector_for(
         }
         TransportKind::Mqtt => mqtt::connector(&p, project_dir)?,
         TransportKind::Can => can::connector(&p, project_dir)?,
+        TransportKind::Rtt => rtt::connector(&p, project_dir)?,
         TransportKind::Replay => {
             let file = p
                 .file

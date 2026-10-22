@@ -63,3 +63,4 @@ toml_edit = "0.25.17"
 tracing = "0.1.44"
 tungstenite = "0.30"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+winresource = "0.1.34"

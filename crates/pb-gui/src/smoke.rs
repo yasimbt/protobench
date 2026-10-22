@@ -640,6 +640,7 @@ fn run_window(dir: &Path) -> Result<String, String> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("ProtoBench smoke test")
+            .with_icon(crate::app_icon())
             .with_inner_size([1400.0, 900.0]),
         persistence_path: Some(std::env::temp_dir().join("protobench-smoke-storage.ron")),
         ..Default::default()

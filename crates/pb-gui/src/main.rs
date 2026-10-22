@@ -83,6 +83,8 @@ fn main() -> ExitCode {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("ProtoBench")
+            .with_app_id("protobench")
+            .with_icon(app_icon())
             .with_inner_size([1400.0, 900.0]),
         ..Default::default()
     };
@@ -104,5 +106,21 @@ fn main() -> ExitCode {
             eprintln!("cannot start the GUI: {e}");
             ExitCode::from(2)
         }
+    }
+}
+
+/// Window and taskbar icon (`assets/icon`, rendered from `protobench.svg`).
+pub(crate) fn app_icon() -> egui::IconData {
+    eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/icon/protobench-256.png"))
+        .expect("embedded icon is a valid PNG")
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn app_icon_decodes() {
+        let icon = super::app_icon();
+        assert_eq!((icon.width, icon.height), (256, 256));
+        assert_eq!(icon.rgba.len(), 256 * 256 * 4);
     }
 }
